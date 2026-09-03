@@ -1,0 +1,211 @@
+'use strict';
+
+const fs = require('node:fs');
+
+const { parseCommandArgs, positiveInt } = require('./args');
+const { EXIT, usageError } = require('./errors');
+const { FORMATS, DEFAULT_FILENAME } = require('../services/graph-export');
+
+const USES_STORE = true;
+
+const DEFAULT_OUT = 'GRAPH_REPORT.md';
+
+const OPTIONS = {
+  help: { type: 'boolean', short: 'h', default: false },
+  out: { type: 'string', short: 'o' },
+  repo: { type: 'string' },
+  limit: { type: 'string' },
+  format: { type: 'string', short: 'f' },
+  nodes: { type: 'string' },
+};
+
+const USAGE = `Usage: koragraph report [--format md|mermaid|graphml|dot|json|cypher] [--out <path>] [--repo <name>]
+
+Write a snapshot of the code graph in a format a human or another tool can open. Nothing leaves
+your machine; this is a read over the graph that already exists.
+
+  --format md      (default) a plain-language Markdown report: node and edge counts by type, the
+                   declarations the most code depends on, what has historically changed together,
+                   and any import cycles. A file a human can open and a repository can commit.
+
+  --format mermaid | graphml | dot | json | cypher
+                   a FOCUSED subgraph — the most depended-on declarations and the real edges
+                   between them — for a diagram (mermaid/dot), a graph tool (graphml → Gephi/yEd,
+                   cypher → Neo4j/FalkorDB), or your own tooling (json).
+
+Options:
+  -f, --format <fmt>  Output format (default: md). One of: ${FORMATS.join(', ')}.
+  -o, --out <path>    Where to write it (default: per-format, e.g. ${DEFAULT_OUT} / graph.mmd).
+      --repo <name>   Only this repository (default: every indexed repository).
+      --limit <n>     Rows per ranked section in the md report (default: 10).
+      --nodes <n>     Declaration nodes to include in a graph export (default: 200).
+  -h, --help          Show this help.`;
+
+function parse(argv) {
+  const { values, positionals } = parseCommandArgs(argv, OPTIONS);
+  if (values.help) return { help: true };
+  if (positionals.length) throw usageError(`report takes no positional arguments (got "${positionals[0]}").`);
+  const format = values.format || 'md';
+  if (!FORMATS.includes(format)) {
+    throw usageError(`report: unknown --format "${format}" (expected one of: ${FORMATS.join(', ')}).`);
+  }
+  return {
+    help: false,
+    format,
+    out: values.out || DEFAULT_FILENAME[format] || DEFAULT_OUT,
+    repo: values.repo || null,
+    limit: positiveInt(values.limit, '--limit', 10),
+    nodes: positiveInt(values.nodes, '--nodes', 200),
+  };
+}
+
+// A symbol name or path can carry a pipe (res.format({'application/json': fn}) is a real
+// declaration name here) which would break a Markdown table row; escape it rather than drop rows.
+function cell(value) {
+  return String(value ?? '').replace(/\|/g, '\\|');
+}
+
+function loc(row) {
+  if (!row.file) return '';
+  return row.line ? `${row.file}:${row.line}` : row.file;
+}
+
+function countTable(counts) {
+  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return '_none_\n';
+  return `| type | count |\n| --- | ---: |\n${
+    entries.map(([k, n]) => `| ${cell(k)} | ${n} |`).join('\n')}\n`;
+}
+
+function renderRepo({ repo, stats, gods, churn, cycles }) {
+  const lines = [];
+  lines.push(`## ${cell(repo)}\n`);
+  lines.push(`- **Nodes:** ${stats.nodes}`);
+  lines.push(`- **Edges:** ${stats.edges} (both ends live)`);
+  lines.push(`- **Files:** ${stats.files}\n`);
+
+  lines.push('### Node types\n');
+  lines.push(countTable(stats.node_types));
+  lines.push('### Edge types\n');
+  lines.push(countTable(stats.edge_types));
+
+  lines.push('### Most depended-on declarations\n');
+  if (gods.length) {
+    lines.push('| declaration | kind | location | dependents | score |');
+    lines.push('| --- | --- | --- | ---: | ---: |');
+    for (const g of gods) {
+      lines.push(`| ${cell(g.name)} | ${cell(g.type)} | ${cell(loc(g))} | ${g.dependents} | ${g.score} |`);
+    }
+    lines.push('');
+  } else {
+    lines.push('_none_\n');
+  }
+
+  lines.push('### Changes together (git-mined temporal coupling)\n');
+  if (churn.length) {
+    lines.push('| declaration | kind | location | co-change partners |');
+    lines.push('| --- | --- | --- | ---: |');
+    for (const c of churn) {
+      lines.push(`| ${cell(c.name)} | ${cell(c.type)} | ${cell(loc(c))} | ${c.co_changes_with} |`);
+    }
+    lines.push('');
+  } else {
+    lines.push('_none — needs a git checkout with history_\n');
+  }
+
+  lines.push('### Import cycles\n');
+  if (cycles.length) {
+    for (const cyc of cycles) {
+      lines.push(`- ${cyc.files.map(cell).join(' → ')} → ${cell(cyc.files[0])}`);
+    }
+    lines.push('');
+  } else {
+    lines.push('_none_\n');
+  }
+
+  return lines.join('\n');
+}
+
+function renderReport(sections) {
+  const head = [
+    '# Graph report',
+    '',
+    'Generated by `koragraph report` from the local code graph. Nothing here left your machine.',
+    '',
+  ];
+  return `${head.join('\n')}\n${sections.map(renderRepo).join('\n')}`;
+}
+
+// Mirrors overview's scoping: all branch rows of one repository are reported together. A
+// detached-HEAD checkout leaves a second branch row, so this can union two commits' state — a
+// known shape the whole tool shares, kept identical here so report and overview cannot disagree.
+async function repoBranches(pool, only) {
+  const { rows } = await pool.query(
+    `SELECT rb.id AS branch_id, r.name AS repo
+       FROM repository_branches rb
+       JOIN repositories r ON r.id = rb.repository_id
+      ORDER BY r.name`,
+  );
+  const byRepo = new Map();
+  for (const r of rows) {
+    if (only && r.repo !== only) continue;
+    if (!byRepo.has(r.repo)) byRepo.set(r.repo, []);
+    byRepo.get(r.repo).push(r.branch_id);
+  }
+  return byRepo;
+}
+
+// A graph export (mermaid/graphml/dot/json/cypher) unions every selected repo's branch rows into
+// one node/edge list and renders it once — node ids are globally unique, so the combined graph is
+// well-formed. The md report stays per-repo because a human reads it section by section.
+async function runExport(parsed, io, pool, byRepo) {
+  const { out } = io;
+  const { exportGraph } = require('../services/graph-analytics');
+  const { render } = require('../services/graph-export');
+  const branchIds = [...byRepo.values()].flat();
+  const graph = await exportGraph(branchIds, { limit: parsed.nodes, db: pool });
+  const repos = [...byRepo.keys()];
+  const title = `koragraph export — ${repos.join(', ')} (${graph.nodes.length} declarations, ${graph.edges.length} edges)`;
+  const text = render(parsed.format, graph, {
+    title, repositories: repos, generated_by: 'koragraph report',
+  });
+  fs.writeFileSync(parsed.out, text);
+  out(`Wrote ${parsed.out} — ${parsed.format} export of ${graph.nodes.length} declarations, ${graph.edges.length} edges across ${repos.length} repo(s).\n`);
+  return EXIT.OK;
+}
+
+async function run(parsed, io) {
+  const { out, err } = io;
+  const pool = require('../db/pool');
+  const analytics = require('../services/graph-analytics');
+
+  const byRepo = await repoBranches(pool, parsed.repo);
+  if (!byRepo.size) {
+    if (parsed.repo) {
+      err(`No repository named "${parsed.repo}" is indexed. Run: koragraph status\n`);
+      return EXIT.NOT_FOUND;
+    }
+    err('The graph is empty — nothing to report. Next: koragraph ingest <path to a repository>\n');
+    return EXIT.OK;
+  }
+
+  if (parsed.format !== 'md') return runExport(parsed, io, pool, byRepo);
+
+  const sections = [];
+  for (const [repo, branchIds] of byRepo) {
+    const [stats, gods, churn, cycles] = await Promise.all([
+      analytics.graphStats(branchIds, { db: pool }),
+      analytics.godNodes(branchIds, { limit: parsed.limit, db: pool }),
+      analytics.churnHotspots(branchIds, { limit: parsed.limit, db: pool }),
+      analytics.importCycles(branchIds, { limit: Math.min(parsed.limit, 10), db: pool }),
+    ]);
+    sections.push({ repo, stats, gods, churn, cycles });
+  }
+
+  fs.writeFileSync(parsed.out, renderReport(sections));
+  const repoWord = sections.length === 1 ? 'repository' : 'repositories';
+  out(`Wrote ${parsed.out} — ${sections.length} ${repoWord}.\n`);
+  return EXIT.OK;
+}
+
+module.exports = { parse, run, USAGE, OPTIONS, USES_STORE, renderReport };

@@ -1,0 +1,82 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/preflight.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/preflight.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/preflight.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/preflight.mjs\"; fi",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/nudge.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|Bash|Read|Grep|Glob|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\"; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Edit|Write|Bash|Read|Grep|Glob|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/record.mjs\"; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\"; fi",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\"; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end.mjs\"; fi",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

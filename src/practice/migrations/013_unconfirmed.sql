@@ -1,0 +1,12 @@
+-- A nullable flag on facts: NULL means confirmed/fresh, non-null is the timestamp revalidate set
+-- when the anchored code changed body since the fact was last checked. Left NULL on every
+-- pre-existing row when this column is first added — nothing about a fact that predates this
+-- column is actually known to have changed, and backfilling it "unconfirmed" for the whole store
+-- would flag everything on faith rather than evidence. The next real revalidation pass is the
+-- first thing that ever sets it, on whatever it actually finds changed.
+--
+-- Not a new lifecycle status (live/pending/retired): a fact carrying this flag is still fully live
+-- in every other sense (not withheld, not expired) — this is the only thing that changes about it,
+-- so a nullable timestamp says everything a whole parallel status enum would, for one column
+-- instead of a new state every other piece of code has to learn to handle.
+ALTER TABLE facts ADD COLUMN unconfirmed_since TEXT;

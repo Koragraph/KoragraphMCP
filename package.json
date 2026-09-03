@@ -1,0 +1,54 @@
+{
+  "name": "koragraphmcp",
+  "version": "0.1.1",
+  "description": "Local multi-repo code-graph MCP server",
+  "license": "BUSL-1.1",
+  "keywords": [
+    "mcp",
+    "code-graph",
+    "tree-sitter",
+    "coding-agent",
+    "static-analysis",
+    "cross-repo",
+    "monorepo",
+    "call-graph"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Koragraph/KoragraphMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Koragraph/KoragraphMCP/issues"
+  },
+  "homepage": "https://www.koragraph.in/",
+  "bin": {
+    "koragraph": "bin/koragraph.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    ".claude/hooks/",
+    ".env.example",
+    "KORAINIT.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js || true"
+  },
+  "dependencies": {
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^16.4.5",
+    "joi": "^18.1.2",
+    "js-yaml": "^5.2.1",
+    "node-sql-parser": "^5.4.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.24.7",
+    "web-tree-sitter-next": "npm:web-tree-sitter@^0.26.12",
+    "winston": "^3.19.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  }
+}

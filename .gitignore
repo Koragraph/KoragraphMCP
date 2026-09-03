@@ -1,0 +1,29 @@
+node_modules/
+.env
+.env.local
+*.log
+logs/
+.DS_Store
+coverage/
+
+# Python bytecode / venvs
+__pycache__/
+*.pyc
+**/.venv/
+
+# Local graph store — derived and disposable, lives in ~/.koragraph, never committed.
+graph.db
+graph.db-*
+
+# Durable practice store — lives in ~/.koragraph, never in the tree.
+practice.db
+practice.db-*
+
+# Agent worktrees — transient, never part of the repo.
+.claude/worktrees/
+
+# Per-session scheduler lock — machine-specific (pid/sessionId), never committed.
+.claude/scheduled_tasks.lock
+
+# npm pack output.
+*.tgz

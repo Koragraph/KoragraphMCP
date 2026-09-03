@@ -1,0 +1,33 @@
+{
+  "repositories": [
+    "repo_file_digests",
+    "published_modules"
+  ],
+  "nodes": [
+    "properties"
+  ],
+  "edges": [
+    "properties"
+  ],
+  "file_extraction_cache": [
+    "nodes",
+    "edges"
+  ],
+  "ingest_jobs": [
+    "skipped_sample",
+    "changed_files",
+    "oversize_sample",
+    "degraded_modalities",
+    "gate_summary",
+    "skipped_as_other_sample"
+  ],
+  "ingest_generations": [
+    "diagnostics"
+  ],
+  "ingest_retry_queue": [
+    "payload"
+  ],
+  "graph_diffs": [
+    "diff_detail"
+  ]
+}
