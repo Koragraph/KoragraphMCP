@@ -6,9 +6,12 @@
 // file's commit message. The rejected names are pinned so the surface cannot
 // regrow by accident.
 
+// Read from package.json, not restated here. The literal that used to sit in this file said
+// 0.1.0 while the package said 0.1.1, so every MCP client was told the wrong version -- and a
+// hardcoded one drifts again at the next release by doing nothing.
 const SERVER_INFO = Object.freeze({
   name: 'koragraph',
-  version: '0.1.0',
+  version: require('../../package.json').version,
 });
 
 const SERVER_INSTRUCTIONS = [

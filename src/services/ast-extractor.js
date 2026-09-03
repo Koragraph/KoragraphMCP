@@ -6,7 +6,7 @@
 let _lastGoQualifiedRefs = [];
 
 const path = require('path');
-const { augmentHttpCallsAcrossLanguages } = require('./http-call-scan');
+const { augmentHttpCallsAcrossLanguages, parameteriseConcatenatedTarget } = require('./http-call-scan');
 
 /**
  * AST-like structural extractor — uses regex patterns to extract classes,
@@ -789,7 +789,10 @@ function maskJsLiterals(lines) {
 // this path: it is a regex over source text already being read, at the exact line already
 // captured.
 const HTTP_CLIENT_CALLEE_RE = /^(?:fetch|axios(?:\.\w+)?|requests\.(?:get|post|put|delete|patch)|http\.(?:get|post|put|delete|patch)|resttemplate\.\w+|webclient\.\w+|httpclient\.\w+|feignclient\.\w+|alamofire\.\w+|urlsession\w*|okhttp\w*|retrofit\w*)$/i;
-const HTTP_URL_LITERAL_RE = /(['"])(\/?(?:api|v\d|\/)[^'"]*|https?:\/\/[^'"]*)\1/;
+// Backtick included: a template literal is how a parameterised URL is written in JS/TS
+// (`${base}/api/orders/${id}`), and leaving it out meant the single commonest shape of a
+// real client call produced no edge at all.
+const HTTP_URL_LITERAL_RE = /(['"`])(\/?(?:api|v\d|\/)[^'"`]*|https?:\/\/[^'"`]*)\1/;
 const HTTP_VERB_HINT_RE = /\bmethod\s*:\s*['"](get|post|put|delete|patch)['"]/i;
 const HTTP_VERBS = new Set(['get', 'post', 'put', 'delete', 'patch']);
 
@@ -800,7 +803,8 @@ function _httpCallHint(callee, method, rawLine) {
   const methodLower = (method || '').toLowerCase();
   const verb = HTTP_VERBS.has(methodLower) ? methodLower
     : (HTTP_VERB_HINT_RE.exec(rawLine || '') || [])[1]?.toLowerCase() || null;
-  return { httpTarget: urlMatch[2], ...(verb ? { httpVerb: verb } : {}) };
+  const httpTarget = parameteriseConcatenatedTarget(urlMatch[2], rawLine || '', urlMatch);
+  return { httpTarget, ...(verb ? { httpVerb: verb } : {}) };
 }
 
 // Language-agnostic outbound-HTTP-call capture is shared with extractors/base.js — see

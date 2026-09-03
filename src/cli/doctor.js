@@ -295,9 +295,66 @@ function mcpCheck() {
   for (const f of configs) {
     let text;
     try { text = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    if (text.includes(bin)) return { name: 'mcp registration', level: 'ok', detail: `registered in ${f}` };
+    if (text.includes(bin)) {
+      return { name: 'mcp registration', level: 'ok', detail: `registered in ${f}`, configFile: f };
+    }
   }
   return { name: 'mcp registration', level: 'warn', detail: 'this checkout is not registered with an editor', remedy: command };
+}
+
+// Which store the SERVER will open, versus the one this CLI just reported on. They are resolved
+// independently — KORAGRAPH_HOME/KORAGRAPH_DB in the registration's `env` block binds the server
+// only, and a shell never sees it — so `remember` over MCP and `practice sync` in a terminal can
+// address two different databases on the same machine, for the same repo, with nothing said.
+//
+// Observed: an agent following the README's own hand-off prompt imported facts over MCP and then
+// wrote its rulebook from a different store, because the two halves of that prompt resolve the
+// path separately. Read-only and best-effort: an unparseable or exotic config says nothing rather
+// than guessing.
+function mcpStoreCheck(registration) {
+  const name = 'mcp store';
+  const cliHome = process.env.KORAGRAPH_HOME || path.join(os.homedir(), '.koragraph');
+  const cliDb = process.env.KORAGRAPH_DB || path.join(cliHome, 'graph.db');
+  if (!registration || !registration.configFile) {
+    return { name, level: 'ok', detail: `cli reads ${cliDb}` };
+  }
+  let env;
+  try {
+    const config = JSON.parse(fs.readFileSync(registration.configFile, 'utf8'));
+    env = findKoragraphServerEnv(config);
+  } catch { return { name, level: 'unknown', detail: 'registration file could not be parsed' }; }
+  if (!env) return { name, level: 'ok', detail: `both read ${cliDb}` };
+
+  const mcpHome = env.KORAGRAPH_HOME || cliHome;
+  const mcpDb = env.KORAGRAPH_DB || path.join(mcpHome, 'graph.db');
+  if (path.resolve(mcpDb) === path.resolve(cliDb)) {
+    return { name, level: 'ok', detail: `both read ${cliDb}` };
+  }
+  return {
+    name,
+    level: 'bad',
+    detail: `the MCP server reads ${mcpDb} but this CLI reads ${cliDb} — facts saved by your agent will not be visible to these commands`,
+    remedy: `set KORAGRAPH_HOME=${mcpHome} in your shell, or drop the env block from ${registration.configFile}`,
+  };
+}
+
+// The koragraph entry can sit under `mcpServers` at the root or nested per-project, and only its
+// `env` matters here.
+function findKoragraphServerEnv(node, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 6) return null;
+  const servers = node.mcpServers;
+  if (servers && typeof servers === 'object') {
+    for (const server of Object.values(servers)) {
+      const args = Array.isArray(server?.args) ? server.args.join(' ') : '';
+      const command = typeof server?.command === 'string' ? server.command : '';
+      if (/koragraph/i.test(`${command} ${args}`) && server.env) return server.env;
+    }
+  }
+  for (const value of Object.values(node)) {
+    const hit = findKoragraphServerEnv(value, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 async function run(_parsed, io) {
@@ -350,7 +407,9 @@ async function run(_parsed, io) {
 
   checks.push(practiceCheck());
   checks.push(hooksCheck());
-  checks.push(mcpCheck());
+  const registration = mcpCheck();
+  checks.push(registration);
+  checks.push(mcpStoreCheck(registration));
 
   out(`koragraph ${version} — doctor\n\n`);
   const width = Math.max(...checks.map((c) => c.name.length));

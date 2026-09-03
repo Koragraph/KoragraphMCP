@@ -13,7 +13,10 @@
 // re-walk, no network, no model — the same determinism guarantee the rest of the extractor holds.
 
 // A quoted URL: an absolute http(s):// URL, or a path beginning `/`, `/api…`, `/v1…`.
-const HTTP_URL_LITERAL_RE = /(['"])(\/?(?:api|v\d|\/)[^'"]*|https?:\/\/[^'"]*)\1/;
+// Backtick included: a template literal is how a parameterised URL is written in JS/TS
+// (`${base}/api/orders/${id}`), and leaving it out meant the single commonest shape of a
+// real client call produced no edge at all.
+const HTTP_URL_LITERAL_RE = /(['"`])(\/?(?:api|v\d|\/)[^'"`]*|https?:\/\/[^'"`]*)\1/;
 const HTTP_VERB_HINT_RE = /\bmethod\s*[:=]\s*['"](get|post|put|delete|patch)['"]/i;
 
 const HTTP_CLIENT_MARKER_RE = new RegExp([
@@ -66,13 +69,25 @@ function httpVerbFromLine(line) {
 // calls never carry.
 const GENERIC_CLIENT_METHOD_RE = /(?:->|\.|::)\s*(?:get|post|put|delete|patch|request|send|fetch)\s*(?:async)?\s*(?:<[^>]*>)?\s*\(/i;
 
+// `'/api/orders/' + id` — the literal is a PREFIX, not the whole path. Stripping its trailing
+// slash downstream made it look like an exact `/api/orders`, which is a different endpoint (and,
+// before the verb fix, bound a GET to a POST). When a concatenation follows the closing quote, the
+// missing segment is a parameter, so say so explicitly and let it meet the server's `{}`.
+const CONCAT_AFTER_LITERAL_RE = /^\s*(?:\+|\.|,|%s|\$)/;
+
+function parameteriseConcatenatedTarget(target, rawLine, match) {
+  if (!target.endsWith('/')) return target;
+  const after = rawLine.slice(match.index + match[0].length);
+  return CONCAT_AFTER_LITERAL_RE.test(after) ? `${target}{}` : target;
+}
+
 function httpCallFromLine(rawLine) {
   if (!rawLine) return null;
   const t = rawLine.trimStart();
   if (t.startsWith('//') || t.startsWith('*') || t.startsWith('#') || t.startsWith('/*') || t.startsWith('--')) return null;
   const urlMatch = HTTP_URL_LITERAL_RE.exec(rawLine);
   if (!urlMatch) return null;
-  const target = urlMatch[2];
+  const target = parameteriseConcatenatedTarget(urlMatch[2], rawLine, urlMatch);
   const absolute = /^https?:\/\//i.test(target);
   const markerHit = HTTP_CLIENT_MARKER_RE.test(rawLine)
     || (absolute && LOCAL_OR_HTTP_MARKER_RE.test(rawLine));
@@ -124,6 +139,7 @@ function augmentHttpCallsAcrossLanguages(nodes, content) {
 module.exports = {
   augmentHttpCallsAcrossLanguages,
   httpCallFromLine,
+  parameteriseConcatenatedTarget,
   httpVerbFromLine,
   HTTP_CLIENT_MARKER_RE,
   HTTP_ATTACH_TYPES,

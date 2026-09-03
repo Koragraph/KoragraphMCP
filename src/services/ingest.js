@@ -2204,6 +2204,44 @@ const isTestPath = (p) => !!p && TEST_PATH_RE.test(p);
 // unscoped ingest runs). This does not apply to a caller that already has a written edge — an
 // already-resolved edge is never invalidated by an untouched file, only a refused one could ever
 // need reconsideration, and only in the caller's favor (more candidates removed, never added).
+// Declarations whose whole line range sits inside a METHOD's — `const test = (c) => ...` written
+// inside `rankFrontier`, a `def` inside a `def`, a closure returned from a factory. A name declared
+// in a function body is not reachable by name from another file in any language here, so it is the
+// same kind of guarantee `private` and `object_prop_fn` already carry, not a heuristic.
+//
+// Only a METHOD parent counts. A method nested in a CLASS is an ordinary member and stays a
+// candidate; that distinction is what keeps a real class method like SqlitePool#query resolvable
+// while the arrow const named `test` stops collecting every `/re/.test(x)` in the repository.
+//
+// Line-range containment rather than a `kind` from the extractor, because no extractor stamps
+// nesting and every one of them already reports start/end lines. A row missing either line is
+// treated as not nested — absent evidence never refuses an edge.
+function functionLocalDeclarations(rows) {
+  const local = new Set();
+  const byFile = new Map();
+  for (const row of rows) {
+    if (row.file_id == null) continue;
+    if (!Number.isInteger(row.start_line) || !Number.isInteger(row.end_line)) continue;
+    if (!byFile.has(row.file_id)) byFile.set(row.file_id, []);
+    byFile.get(row.file_id).push(row);
+  }
+  for (const fileRows of byFile.values()) {
+    // Outermost first, so a stack of still-open METHOD ranges is exactly the enclosing scopes.
+    fileRows.sort((a, b) => a.start_line - b.start_line || b.end_line - a.end_line);
+    const open = [];
+    for (const row of fileRows) {
+      while (open.length && open[open.length - 1].end_line < row.start_line) open.pop();
+      // Identical ranges are the same declaration seen twice (a one-line `class A { m() {} }`),
+      // not nesting, so containment has to be strict on at least one side.
+      const enclosing = open.some((p) => p.end_line >= row.end_line
+        && (p.start_line < row.start_line || p.end_line > row.end_line));
+      if (enclosing) local.add(row.id);
+      if (row.node_type === 'METHOD') open.push(row);
+    }
+  }
+  return local;
+}
+
 async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
   const scoped = Array.isArray(scopeFileIds) && scopeFileIds.length > 0;
   const { rows: callerNodes } = await pool.query(
@@ -2241,6 +2279,7 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
   const { rows: methodRows } = await pool.query(
     `SELECT n.id, n.name, e.to_node_id AS class_node_id,
             nc.name AS class_name, nf.path AS def_path,
+            n.node_type, n.file_id, n.start_line, n.end_line,
             json_extract(n.properties, '$.visibility') AS visibility,
             json_extract(n.properties, '$.kind') AS kind
      FROM nodes n
@@ -2271,6 +2310,7 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
   const defPathById = new Map();
   const defPrivateById = new Set();
   const defObjPropFnById = new Set();
+  const defFunctionLocalById = functionLocalDeclarations(methodRows);
   for (const row of methodRows) {
     if (row.def_path) defPathById.set(row.id, row.def_path);
     if (row.visibility === 'private') defPrivateById.add(row.id);
@@ -2329,6 +2369,7 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
   let bareNameUniqueFallback = 0;
   let callPrivateRefused = 0;
   let callObjPropFnRefused = 0;
+  let callFunctionLocalRefused = 0;
   let callFanoutDemoted = 0;
   for (const caller of callerNodes) {
     const callExprs = caller.call_exprs;
@@ -2474,6 +2515,25 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
         if (!targets.length) { callObjPropFnRefused += beforeObjProp; continue; }
       }
 
+      // A declaration inside a function body is unreachable by name from another file, so a
+      // cross-file call cannot be evidence for it. Without this the bare-name rungs bind every
+      // builtin member call in the repository to whichever function-local helper happens to share
+      // the name -- and, because `call_expression_unique` is tier 5, they are written as PROOF
+      // rather than as HEURISTIC_CALLS, so no consumer can filter them out.
+      //
+      // Measured on this repository: `const has = re => ...` inside classifier.js#detectFrom
+      // collected 138 cross-file edges, `const test = (c) => ...` inside blast-radius.js
+      // #rankFrontier collected 117, and every one of them is a `.has(`/`.test(` on a Map or a
+      // RegExp. Five such locals accounted for 326 false CALLS edges and took five of the top ten
+      // rows in `overview`, the first tool a new user calls.
+      //
+      // Refused cross-file only: the same-file call that IS the closure's real caller stays.
+      if (callerPath) {
+        const beforeLocal = targets.length;
+        targets = targets.filter((id) => !defFunctionLocalById.has(id) || defPathById.get(id) === callerPath);
+        if (!targets.length) { callFunctionLocalRefused += beforeLocal; continue; }
+      }
+
       if (!isTestPath(callerPath)) {
         const before = targets.length;
         const allBeforeTestFilter = targets;
@@ -2573,7 +2633,7 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
     );
     written += chunk.length;
   }
-  console.log(`[resolveCallExpressionEdges] branchId=${branchId} written=${written} fanout_refused=${callFanoutRefused} (>${MAX_CALL_CANDIDATE_FANOUT} candidates) test_only_targets_refused=${callTestTargetsRefused} cross_language_refused=${callCrossLanguageRefused} bare_name_demoted=${bareNameUniqueFallback} private_cross_file_refused=${callPrivateRefused} objprop_cross_file_refused=${callObjPropFnRefused} receiver_unresolved_refused=${callReceiverUnresolved}`);
+  console.log(`[resolveCallExpressionEdges] branchId=${branchId} written=${written} fanout_refused=${callFanoutRefused} (>${MAX_CALL_CANDIDATE_FANOUT} candidates) test_only_targets_refused=${callTestTargetsRefused} cross_language_refused=${callCrossLanguageRefused} bare_name_demoted=${bareNameUniqueFallback} private_cross_file_refused=${callPrivateRefused} objprop_cross_file_refused=${callObjPropFnRefused} function_local_cross_file_refused=${callFunctionLocalRefused} receiver_unresolved_refused=${callReceiverUnresolved}`);
   return written;
 }
 
@@ -3478,7 +3538,14 @@ async function resolveHttpClientEdges(branchId, projectId, _pool = pool) {
         const urlPath = _extractPath(ce.httpTarget);
         if (!urlPath) continue;
         const verb = (ce.httpVerb || '').toLowerCase();
-        const epId = (verb && endpointByKey.get(`${verb} ${urlPath}`)) || endpointByPath.get(urlPath);
+        // Path-only matching is for when the verb is UNKNOWN, which is what httpVerbFromLine's own
+        // comment says it returns null for. Falling back to it after a KNOWN verb missed bound
+        // `axios.get('/api/orders')` to `POST /api/orders` -- the one endpoint sharing that path.
+        // A known verb that finds no endpoint is evidence there is no such call, not licence to
+        // pick a different method's.
+        const epId = verb
+          ? endpointByKey.get(`${verb} ${urlPath}`)
+          : endpointByPath.get(urlPath);
         if (epId && epId !== node.id) {
           triples.set(`${node.id}|${epId}|CALLS`, [node.id, epId, 'CALLS', verb ? `${verb} ${urlPath}` : urlPath]);
         }
@@ -3574,6 +3641,13 @@ function _extractPath(rawUrl) {
   if (!u.startsWith('/')) return null;
   // Strip query string and fragment
   u = u.split('?')[0].split('#')[0].toLowerCase().replace(/\/$/, '');
+  // Collapse a parameter segment to the same `{}` the ENDPOINT side already uses, so a client's
+  // `/api/orders/${id}` meets the server's `GET /api/orders/:id`. Without this the two planes
+  // normalised differently and every parameterised call missed.
+  u = u
+    .replace(/\$\{[^}]*\}/g, '{}')
+    .replace(/\{[^}]*\}/g, '{}')
+    .replace(/(^|\/):[^/]+/g, '$1{}');
   if (!u || u === '/') return null;
   return u;
 }

@@ -208,7 +208,7 @@ function movedVerdict(graphDb, branch, anchor) {
 }
 
 // One anchor → one verdict. Verdicts that keep a fact alive: ok, unconfirmed, renamed, moved, unknown.
-function checkAnchor(anchor, { graphDb, branchCache }) {
+function checkAnchor(anchor, { graphDb, branchCache, suppressRename = false }) {
   if (!graphDb) return { verdict: 'unknown', reason: 'no code graph' };
 
   let branch = branchCache.get(anchor.repo_id);
@@ -332,7 +332,7 @@ function checkAnchor(anchor, { graphDb, branchCache }) {
     };
   }
 
-  const renamed = bestRenameCandidate(anchor, decls, repoRoot);
+  const renamed = suppressRename ? null : bestRenameCandidate(anchor, decls, repoRoot);
   if (renamed) {
     return {
       verdict: 'renamed',
@@ -438,6 +438,42 @@ function checkRepoGrain(practiceDb, ctx) {
   if (verdict.status === 'ok') report.uncontradicted += clearContradicted.run(id).changes;
 }
 
+// One declaration cannot be the rename of two different ones. bestRenameCandidate scores each
+// anchor independently, and its dominance guard only compares candidates WITHIN one anchor's list
+// -- so when a file loses two declarations and gains one, every orphaned anchor scores that lone
+// survivor, the runner-up is undefined, the guard is skipped, and they all re-anchor to it.
+//
+// Observed: a file holding matchPng and matchJpg, one fact on each, replaced by a single matchGif.
+// Both facts followed the rename, leaving matchGif carrying two mutually contradictory rules --
+// including a `law`, which recall delivers as an instruction to obey. The README's contract is
+// "rename the code, the fact follows; delete it, the fact orphans", and the comment beside the
+// dominance guard already says a confident wrong re-resolution is worse than an orphan.
+//
+// So the claims are settled globally: highest similarity keeps the declaration, everyone else is
+// re-checked with the rename suppressed and takes the moved-or-orphaned path they should have had.
+// Ties break on the lower fact id, so a re-run of the same store gives the same answer.
+function renameClaimKey(anchor, node) {
+  return `${anchor.repo_id} ${anchor.file_path} ${node.name} ${node.start_line}`;
+}
+
+function losingRenameClaims(entries) {
+  const best = new Map();
+  for (const entry of entries) {
+    const { result } = entry;
+    if (!result || result.verdict !== 'renamed' || !result.node) continue;
+    const key = renameClaimKey(entry.anchor, result.node);
+    const held = best.get(key);
+    const better = !held
+      || (result.similarity || 0) > (held.result.similarity || 0)
+      || ((result.similarity || 0) === (held.result.similarity || 0)
+          && entry.anchor.fact_id < held.anchor.fact_id);
+    if (better) best.set(key, entry);
+  }
+  const winners = new Set([...best.values()]);
+  return entries.filter((e) => e.result && e.result.verdict === 'renamed' && e.result.node
+    && !winners.has(e));
+}
+
 function revalidate(practiceDb, graphDb, { now = new Date() } = {}) {
   const facts = practiceDb.prepare('SELECT id, body FROM facts WHERE expired_at IS NULL').all();
   const anchorsOf = practiceDb.prepare('SELECT * FROM anchors WHERE fact_id = ?');
@@ -458,15 +494,29 @@ function revalidate(practiceDb, graphDb, { now = new Date() } = {}) {
   };
 
   const run = practiceDb.transaction(() => {
-    for (const { id, body } of facts) {
-      const anchors = anchorsOf.all(id);
+    // checkAnchor only reads, so every verdict can be computed before anything is written. That is
+    // what makes the rename claims above settleable: they have to be compared across facts, and the
+    // per-fact loop below would otherwise have already applied the first claimant's rename.
+    const work = facts.map(({ id, body }) => ({ id, body, anchors: anchorsOf.all(id) }));
+    const entries = [];
+    for (const fact of work) {
+      for (const anchor of fact.anchors) {
+        entries.push({ anchor, result: checkAnchor(anchor, { graphDb, branchCache }) });
+      }
+    }
+    for (const loser of losingRenameClaims(entries)) {
+      loser.result = checkAnchor(loser.anchor, { graphDb, branchCache, suppressRename: true });
+    }
+    const verdictOf = new Map(entries.map((e) => [e.anchor, e.result]));
+
+    for (const { id, body, anchors } of work) {
       checkRepoGrain(practiceDb, { id, body, anchors, graphDb, branchCache, now, report,
         markContradicted, clearContradicted });
       let alive = false;
       let sawUnconfirmed = false;
 
       for (const anchor of anchors) {
-        const result = checkAnchor(anchor, { graphDb, branchCache });
+        const result = verdictOf.get(anchor);
         report.anchors_checked++;
         report[result.verdict]++;
         if (KEEPS_ALIVE.has(result.verdict)) alive = true;

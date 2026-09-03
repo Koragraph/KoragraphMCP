@@ -20,8 +20,17 @@ const SECRET_PATH_RE = /(?:^|\/)(?:\.env(?:\.\w+)*|\.envrc|credentials?(?:\.\w+)
 // The separator class covers `=`, `:` (YAML) and `":` (JSON); the key alternation is a substring
 // match so DB_PASSWORD, POSTGRES_PASSWORD and db_password all hit.
 const SECRET_KEY_WORDS = 'SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|TOKEN|CREDENTIAL';
+// The key name is rarely the first thing on the line in SOURCE, only in config. `const API_KEY`,
+// `let apiKey`, `private static final String API_KEY` all put one or more words in front of it,
+// and the key-name class cannot cross the space between them -- so the original pattern matched
+// JSON, .env and bare Python assignment and missed every hardcoded credential in JS, TS, Java, Go
+// and C#, which is the commonest place a real one is found. Bounded repetition, so the leading
+// run cannot backtrack pathologically on a long line.
+const SECRET_DECL_PREFIX = '(?:[A-Za-z_$][A-Za-z0-9_$]*[\\s*&]+){0,6}';
+// `:=` is Go's declaration operator; `[:=]` alone consumed the `:` and then failed on the `=`.
+const SECRET_ASSIGN_OP = '(?::=|[:=])';
 const SECRET_CONTENT_RE = new RegExp(
-  `(?:^|[\\n{,])\\s*["']?[A-Za-z0-9_.\\-]*(?:${SECRET_KEY_WORDS})[A-Za-z0-9_.\\-]*["']?\\s*[:=]\\s*["']?[A-Za-z0-9+/=_\\-]{12,}`,
+  `(?:^|[\\n{,;(])\\s*${SECRET_DECL_PREFIX}["']?[A-Za-z0-9_.\\-]*(?:${SECRET_KEY_WORDS})[A-Za-z0-9_.\\-]*["']?\\s*${SECRET_ASSIGN_OP}\\s*["']?[A-Za-z0-9+/=_\\-]{12,}`,
   'im'
 );
 
