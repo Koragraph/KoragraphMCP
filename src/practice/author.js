@@ -75,15 +75,20 @@ function repoRelative(repoRoot, file) {
 // is missed by design: catching it would mean probing every word in every sentence.
 const SHAPED_ID_RE = /[A-Z].*[a-z]|_/;
 const CANDIDATE_RE = /\b[A-Za-z_$][\w$]*\b/g;
+const SUBSTITUTION_RE = /\b(?:instead of|rather than|in place of|prefer\b[^.]*\bover\b)/i;
 
 function anchorCandidates(body) {
   const text = String(body || '');
-  // A substitution rule names alternatives to prefer or avoid, so its symbols are expected to be
-  // external and resolving one would anchor the rule to the thing it tells you NOT to use.
-  if (/\b(?:instead of|rather than|in place of|prefer\b[^.]*\bover\b)/i.test(text)) return [];
+  // A substitution rule names an alternative to avoid — "use fastPath instead of openPool" — and
+  // anchoring to a name after the marker would attach the rule to the very thing it says not to
+  // use. Only the TAIL is dropped, not the sentence: "refreshSession throws on an invalid token
+  // instead of returning null" describes one declaration, and its subject sits before the marker.
+  const cut = SUBSTITUTION_RE.exec(text);
+  const limit = cut ? cut.index : text.length;
   const out = [];
   const seen = new Set();
   for (const m of text.replace(/`/g, ' ').matchAll(CANDIDATE_RE)) {
+    if (m.index >= limit) break;
     const w = m[0];
     // A dotted name is namespaced and external (`console.log`); CANDIDATE_RE already splits those,
     // so the guard is on the character before the match rather than inside it.
