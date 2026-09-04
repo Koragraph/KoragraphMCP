@@ -326,24 +326,41 @@ const MAX_FLAGGED_SHOWN = 5;
 // happen to rank in the top ANNOTATION_CANDIDATES at a heavily-annotated anchor would silently lose
 // its own flag slot to whatever WAS in that capped list, the same failure mode this whole query
 // exists to prevent.
+// These two carry the SAME two guards every other clause in this module carries, and they carry
+// them because they did not: both selected `f.body` with no tier filter, so a `hypothesis` whose
+// anchor drifted became `unconfirmed` and was handed to a reader through the annotation slot. That
+// is the one tier this layer promises is unreachable, and the promise is the whole reason the tier
+// exists. It is stated as enforced "in SQL, not by a caller remembering" at the top of this file;
+// enforcement spread over several clauses is exactly how one gets missed, so the guards are written
+// as substitutions here rather than as a copy of the predicate.
 const FLAGGED_AT_SYMBOL = `
 SELECT f.id AS fact_id, f.tier, f.body, f.valid_at, f.created_at, f.unconfirmed_since
   FROM facts f JOIN anchors a ON a.fact_id = f.id
  WHERE f.expired_at IS NULL AND f.unconfirmed_since IS NOT NULL
+   AND f.tier IN ('law', 'observation')
+   %CONTRADICTED%
    AND a.repo_id = ? AND a.file_path = ? AND a.symbol_name = ? AND a.grain = 'symbol'
  ORDER BY f.unconfirmed_since ASC, f.id DESC`;
 const FLAGGED_AT_FILE = `
 SELECT f.id AS fact_id, f.tier, f.body, f.valid_at, f.created_at, f.unconfirmed_since
   FROM facts f JOIN anchors a ON a.fact_id = f.id
  WHERE f.expired_at IS NULL AND f.unconfirmed_since IS NOT NULL
+   AND f.tier IN ('law', 'observation')
+   %CONTRADICTED%
    AND a.repo_id = ? AND a.file_path = ? AND a.grain = 'file'
  ORDER BY f.unconfirmed_since ASC, f.id DESC`;
 
 function flaggedAt(conn, { repoId, filePath, symbolName }) {
+  // Probed, not assumed, for the reason buildQuery probes it: a read-only open does not migrate,
+  // so naming the column on a store no writer has touched since 011 would throw, and the catch
+  // below would turn that into silence for every flagged fact rather than for none.
+  const contradicted = hasContradicted(conn) ? 'AND f.contradicted_at IS NULL' : '';
   try {
     return symbolName
-      ? conn.prepare(FLAGGED_AT_SYMBOL).all(repoId, filePath, symbolName)
-      : conn.prepare(FLAGGED_AT_FILE).all(repoId, filePath);
+      ? conn.prepare(FLAGGED_AT_SYMBOL.replace('%CONTRADICTED%', contradicted))
+        .all(repoId, filePath, symbolName)
+      : conn.prepare(FLAGGED_AT_FILE.replace('%CONTRADICTED%', contradicted))
+        .all(repoId, filePath);
   } catch { return []; }
 }
 
