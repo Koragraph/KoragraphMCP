@@ -690,44 +690,17 @@ function scopesIn(events) {
     : a.session_id > b.session_id ? 1 : 0));
 }
 
-// The other half of the same events. fail-fix.js keeps the edit that finally worked; the hours went
-// into the approaches that were backed out, and those are what stop the next agent starting at A.
-// Both go through promoteLessons, so a tombstone anchors, drifts and expires exactly like a
-// correction rather than becoming a second kind of memory with its own rules.
-function harvestTombstones(db, graph, events, lessonKey) {
-  const { mineTombstones } = require('../practice/tombstones');
-  const { promoteLessons } = require('../practice/promote');
-
-  // Namespaced. `lessonKey` keys on the failure SIGNATURE, which a tombstone and the fail→fix
-  // lesson about the same failure share — an un-prefixed key would let whichever ran first
-  // silently suppress the other.
-  const keyOf = (l) => `tombstone\x00${lessonKey(l)}`;
-  const seen = db.prepare('SELECT 1 FROM harvested_lessons WHERE lesson_key = ?');
-  const fresh = mineTombstones(events).filter((l) => !seen.get(keyOf(l)));
-  if (!fresh.length) return { count: 0, factIds: [] };
-
-  const now = new Date();
-  const { factIds } = promoteLessons(db, graph, fresh, { now, source: 'harvest' });
-  // Same alignment rule harvest.js applies: promoteLessons drops a lesson that resolves to no
-  // anchor, so the ids are positional only when nothing was dropped.
-  const aligned = factIds.length === fresh.length;
-  const mark = db.prepare(
-    'INSERT OR IGNORE INTO harvested_lessons (lesson_key, session_id, agent_id, fact_id, created_at) VALUES (?,?,?,?,?)',
-  );
-  const stamp = now.toISOString();
-  db.transaction(() => {
-    fresh.forEach((l, i) => mark.run(
-      keyOf(l), l.session_id || '', l.agent_id || null, aligned ? factIds[i] : null, stamp,
-    ));
-  })();
-  return { count: fresh.length, factIds };
-}
-
+// Mines both halves of the same events. fail-fix.js keeps the edit that finally worked; the hours
+// went into the approaches that were backed out, and those are what stop the next agent starting at
+// A. Both go through promoteLessons, so a tombstone anchors, drifts and expires exactly like a
+// correction rather than becoming a second kind of memory with its own rules. The tombstone half
+// lives in practice/tombstones.js beside its miner, because the ingest path calls it too.
 function runHarvest(parsed, io) {
   const { out, err } = io;
   let harvestSession = null;
   let lessonKey = null;
   try { ({ harvestSession, lessonKey } = require('../practice/harvest')); } catch { /* not built yet */ }
+  const { harvestTombstones } = require('../practice/tombstones');
 
   const { db } = openPractice(true);
   if (!harvestSession) {

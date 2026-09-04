@@ -145,9 +145,32 @@ function targetFor({ graphDb, branch, repoId, repoRoot, symbol, file, body = '' 
       const named = substitution ? []
         : extractReferents(String(body)).symbols.filter((n) => !n.includes('.')).slice(0, 5);
       if (named.length) {
-        const anyResolves = named.some((n) => locateSymbol(graphDb, branch, { symbol: n, fileHint: null }).found);
-        if (!anyResolves) {
+        const hits = named
+          .map((n) => ({ name: n, hit: locateSymbol(graphDb, branch, { symbol: n, fileHint: null }) }))
+          .filter((r) => r.hit.found);
+        if (!hits.length) {
           return { anchored: false, ambiguous: 0, missing: 'symbol', target: repoTarget(repoId) };
+        }
+        // One named declaration resolving to one place is the only case where the rule's SUBJECT is
+        // not a guess, so it is the only case that earns a symbol anchor. Two resolving names means
+        // the sentence mentions two declarations and nothing here can say which it is ABOUT; an
+        // ambiguous single name is the same problem one level down. Both keep repo grain, because a
+        // wrong anchor expires a rule that is still true — strictly worse than never checking it.
+        if (hits.length === 1 && hits[0].hit.ambiguous === 0) {
+          const node = hits[0].hit.node;
+          return {
+            anchored: true,
+            ambiguous: 0,
+            target: {
+              repo_id: repoId,
+              file_path: node.file_path,
+              start_line: node.start_line,
+              end_line: node.end_line,
+              abs_path: repoRoot ? `${repoRoot}/${node.file_path}` : null,
+              named_node: node,
+            },
+            resolved: node,
+          };
         }
       }
     } catch { /* referent audit is best-effort; a parse failure must not block a store */ }

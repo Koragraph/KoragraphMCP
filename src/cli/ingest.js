@@ -186,12 +186,26 @@ function splitDiff(diff) {
 // re-ingest after any rename or add inside the workspace does nothing, with no error anywhere.
 // Rebase each path onto the ingest root here, and drop (with a count, not silently) anything that
 // falls outside it — a change elsewhere in the monorepo is real, but not this ingest's problem.
+// `path.resolve` does not follow SYMLINKS and `git rev-parse --show-toplevel` always returns a
+// fully resolved path. On macOS `/tmp` is a symlink to `/private/tmp`, and any checkout reached
+// through a symlinked parent has the same shape. The two roots then compare UNEQUAL for what is
+// really a plain checkout, every changed path rebases to a `../..` escape, and the entire diff is
+// dropped as out-of-scope — while the commit sha still advances at the end of the pass. The index
+// is left silently stale and claiming to be current, which is worse than either being stale or
+// being current: every anchor over it reads `unknown` and no re-ingest ever repairs it short of
+// --full. Canonicalise both sides before they are compared.
+function canonicalRoot(p) {
+  try { return fs.realpathSync(path.resolve(p)); } catch (_) { return path.resolve(p); }
+}
+
 function rebaseDiffToIngestRoot(diffPaths, gitRoot, ingestRoot) {
-  if (!gitRoot || path.resolve(gitRoot) === path.resolve(ingestRoot)) return { ...diffPaths, outOfScope: 0 };
+  const canonGitRoot = gitRoot ? canonicalRoot(gitRoot) : null;
+  const canonIngestRoot = canonicalRoot(ingestRoot);
+  if (!canonGitRoot || canonGitRoot === canonIngestRoot) return { ...diffPaths, outOfScope: 0 };
   let outOfScope = 0;
   const rebase = (relPaths) => relPaths.map((p) => {
-    const abs = path.resolve(gitRoot, p);
-    const rel = path.relative(ingestRoot, abs);
+    const abs = path.resolve(canonGitRoot, p);
+    const rel = path.relative(canonIngestRoot, abs);
     if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) { outOfScope++; return null; }
     return rel.split(path.sep).join('/');
   }).filter(Boolean);
@@ -483,13 +497,62 @@ function revalidatePractice(err, repoPaths = []) {
     const practice = openPracticeDb();
     // A stated_rules row is an audit trail only, never auto-promoted (see author.js's own note on
     // why). Nothing wakes this tail besides live facts.
+    // Counted before the guard because the guard now consults it. A store with no facts but with
+    // captured events is the BOOTSTRAP case, not an idle one: refusing to do any work there is
+    // self-fulfilling, because harvesting is the only thing that would have produced the first fact.
     const liveFacts = practice.prepare('SELECT count(*) c FROM facts WHERE expired_at IS NULL').get().c;
-    if (!liveFacts) {
+    const unharvested = practice.prepare('SELECT count(*) c FROM events WHERE harvested_at IS NULL').get().c;
+    if (!liveFacts && !unharvested) {
       practice.close();
       return;
     }
     const graph = openGraphDb();
     try {
+      // Harvest with the graph IN HAND. The SessionEnd hook cannot open graph.db (its 5 s budget
+      // forbids a synchronous busy wait against an ingest), so it calls harvestSession(db, null, …)
+      // and every lesson it promotes lands at file grain, unable to ever bind to the declaration it
+      // is about. Its own comment points at `practice harvest` to re-resolve them offline — but
+      // that verb selects `harvested_at IS NULL` and the hook has already stamped every row it saw,
+      // so the re-resolve could never see them and in 14 days of real use it never once ran.
+      // An ingest is the one moment the graph is already open, which makes it the right place.
+      if (unharvested) {
+        try {
+          const { harvestSession, lessonKey } = require('../practice/harvest');
+          // UNHARVESTED rows only, and harvestSession's own replay default rather than a wide
+          // window. Re-reading rows the hook already stamped cannot produce anything: those
+          // lessons are in harvested_lessons and dedup by identity, so a wider window is pure
+          // cost — measured at +3.4s per ingest against a 17k-event store, on a pass that runs
+          // every time a watcher fires. What this pass is FOR is the rows the hook has not
+          // reached (a session still open, a hook that never fired) and, unlike the hook, it
+          // holds the graph, so those lessons anchor to a declaration instead of to a file.
+          const rows = practice.prepare(
+            'SELECT * FROM events WHERE harvested_at IS NULL ORDER BY ts, id',
+          ).all();
+          // Per SCOPE, never one pass over every session at once: runFailFix pairs a failure with
+          // a later pass, and a mixed-session stream pairs them across sessions that never met.
+          // A NULL agent_id is the main loop and is a scope of its own, so it is carried through
+          // as null rather than collapsed with the subagents that ran beside it.
+          const scopes = new Map();
+          for (const e of rows) {
+            const key = `${e.session_id}\x00${e.agent_id || ''}`;
+            if (!scopes.has(key)) scopes.set(key, { session_id: e.session_id, agent_id: e.agent_id });
+          }
+          for (const sc of scopes.values()) {
+            harvestSession(practice, graph, { sessionId: sc.session_id, agentId: sc.agent_id });
+          }
+          // The other half of a long debug: what was tried and BACKED OUT. Uses the rows read
+          // above, because harvestSession stamps `harvested_at` as it goes and a second query
+          // here would come back empty.
+          const { harvestTombstones } = require('../practice/tombstones');
+          harvestTombstones(practice, graph, rows, lessonKey);
+        } catch (_) { /* harvesting is best-effort; never fail an ingest over it */ }
+      }
+
+      // Recounted AFTER harvesting: the pass above may have produced the store's first fact, and
+      // revalidating nothing prints a line about nothing on every ingest.
+      const factsToCheck = practice.prepare('SELECT count(*) c FROM facts WHERE expired_at IS NULL').get().c;
+      if (!factsToCheck) return;
+
       const r = revalidate(practice, graph);
       // Open-loop anchors ride the same cadence as fact anchors — an ingest is the only moment the
       // graph moves, so it is the only moment a loop's rename/move can be followed. Best-effort and

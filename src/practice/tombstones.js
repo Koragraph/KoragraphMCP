@@ -458,7 +458,41 @@ function mineTombstones(events, opts = {}) {
   return lessons;
 }
 
+// Promotion, not mining. It lived in the CLI verb, which is the only place that called it — and
+// that verb selects `harvested_at IS NULL`, which the SessionEnd hook has already stamped on every
+// event it saw. The miner was therefore unreachable in normal operation: 17k captured events over
+// 14 days produced zero tombstones, not because the signals never fired but because nothing ever
+// asked. It belongs beside the miner so the ingest path can call it too.
+function harvestTombstones(db, graph, events, lessonKey) {
+  const { promoteLessons } = require('./promote');
+
+  // Namespaced. `lessonKey` keys on the failure SIGNATURE, which a tombstone and the fail→fix
+  // lesson about the same failure share — an un-prefixed key would let whichever ran first
+  // silently suppress the other.
+  const keyOf = (l) => `tombstone\x00${lessonKey(l)}`;
+  const seen = db.prepare('SELECT 1 FROM harvested_lessons WHERE lesson_key = ?');
+  const fresh = mineTombstones(events).filter((l) => !seen.get(keyOf(l)));
+  if (!fresh.length) return { count: 0, factIds: [] };
+
+  const now = new Date();
+  const { factIds } = promoteLessons(db, graph, fresh, { now, source: 'harvest' });
+  // Same alignment rule harvest.js applies: promoteLessons drops a lesson that resolves to no
+  // anchor, so the ids are positional only when nothing was dropped.
+  const aligned = factIds.length === fresh.length;
+  const mark = db.prepare(
+    'INSERT OR IGNORE INTO harvested_lessons (lesson_key, session_id, agent_id, fact_id, created_at) VALUES (?,?,?,?,?)',
+  );
+  const stamp = now.toISOString();
+  db.transaction(() => {
+    fresh.forEach((l, i) => mark.run(
+      keyOf(l), l.session_id || '', l.agent_id || null, aligned ? factIds[i] : null, stamp,
+    ));
+  })();
+  return { count: fresh.length, factIds };
+}
+
 module.exports = {
+  harvestTombstones,
   mineTombstones, mineReverts, mineDeadCommands, mineAbandonedFiles,
   KIND, TIER, BODY_MAX, MIN_FAILS,
 };
