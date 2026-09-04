@@ -92,6 +92,11 @@ that code, right now, and form one of three verdicts. Do this BEFORE calling `re
 A rule that names no code at all (a formatting convention, a process rule with nothing to anchor
 to) has nothing to verify — skip this step for it and store it as a plain rule at repo grain.
 
+**Write down the declaration you landed on.** Reading the code to verify a rule is also how you
+find out what the rule is anchored to, and that name is what step 5 needs as `symbol`. If reading
+the rule sent you to one function, class or method, that is the anchor — carry it forward. Losing
+it here is why an imported rulebook ends up anchored to file paths and expires for nobody.
+
 While you have the code open for this, also form an opinion on **severity**, for anything you mark
 contradicted: does the gap look consequential (a safety, security, or correctness guarantee that
 quietly stopped being true) or cosmetic (a rename, a minor rewording, something no one would act
@@ -109,9 +114,17 @@ remember` shell command if you don't have MCP access in this session):
 - `kind` — `hazard` for a warning or a trap, `ritual` for a command to run, `law` for a convention
   or constraint, `correction` for a rule that exists because a previous belief was wrong,
   `tombstone` for "X was deleted, do not look for it".
-- `symbol` — the declaration the rule is about, when it names one (`UserRepo.save`,
-  `runIngest`, `parseSizeInBytes`).
-- `file` — the file or directory the rule is about, when it names one and no symbol.
+- `symbol` — **the declaration the rule is about.** This is the field that matters and the one this
+  pass most often gets wrong. You just read that code in step 4, so you already know the
+  declaration's name — pass it (`UserRepo.save`, `runIngest`, `parseSizeInBytes`). A fact anchored
+  to a declaration follows it through a rename and dies with it; a fact anchored to a file survives
+  the deletion of everything it was describing, and will still be asserted years later. Do not
+  wait for the rule to spell the name out: "the retry helper caps at three attempts" names
+  `retryRequest` as surely as if it had typed it, and step 4 is where you found that out.
+- `file` — the file or directory the rule is about, **only when you looked and no single
+  declaration owns it**: a rule about a config or schema file, a rule about a whole directory, a
+  rule that spans every function in a module. Reaching for this because it was the quicker answer
+  is the single most common way this import degrades into a CLAUDE.md stored in SQLite.
 - `source` — always `import` for anything from this pass. Never `user`: you did not say this, the
   file did, and the store needs to be able to tell the difference.
 - `verified` and `note` — the verdict from step 4, whenever the rule named checkable code.

@@ -38,7 +38,13 @@ function rejected(reason) {
 // rather than resolved by guessing: a bare `get` that matches forty methods should anchor to the
 // best candidate AND say it was ambiguous, because the reader is the one who can settle it.
 function locateSymbol(graphDb, branch, { symbol, fileHint }) {
-  const hits = resolveByName(graphDb, branch.branchId, { name: symbol, fileHint });
+  // Call syntax is how both a developer and an instruction file name a function — "evictStale() is
+  // O(n)". The graph stores the declaration under its bare name, so a trailing argument list must
+  // come off before the lookup or the name resolves to nothing and the stale-instruction audit
+  // reports a live declaration as deleted code.
+  const name = String(symbol || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+  if (!name) return { found: false, ambiguous: 0, node: null };
+  const hits = resolveByName(graphDb, branch.branchId, { name, fileHint });
   if (!hits.length) return { found: false, ambiguous: 0, node: null };
   const distinct = new Set(hits.map((h) => `${h.file_path}:${h.start_line}`)).size;
   return { found: true, ambiguous: distinct > 1 ? distinct : 0, node: hits[0] };
@@ -54,6 +60,65 @@ function repoRelative(repoRoot, file) {
   if (!s) return null;
   if (path.isAbsolute(s)) return relativise(repoRoot, s);
   return s.replace(/^\.\//, '').split(path.sep).join('/');
+}
+
+// Identifier-SHAPED words in a body, as candidates to look up. `extractReferents` is deliberately
+// not reused: it feeds `kindOf`, where widening the net would reclassify imported prose, and it
+// only sees backticked or parenthesised names. Nobody speaking to an agent types backticks —
+// "validateToken must reject short tokens" is the normal shape of a stated rule and it carries a
+// referent that the graph can confirm.
+//
+// Shape is a FILTER, never the decision: every candidate is resolved against the graph and dropped
+// unless it is a real declaration here. The shape test only keeps the lookup cheap and stops bare
+// English words ("everywhere", "never") from being probed at all, so `SHAPED_ID_RE`'s hump/underscore
+// requirement is what separates `openPool` from prose. A lowercase single-word declaration (`main`)
+// is missed by design: catching it would mean probing every word in every sentence.
+const SHAPED_ID_RE = /[A-Z].*[a-z]|_/;
+const CANDIDATE_RE = /\b[A-Za-z_$][\w$]*\b/g;
+
+function anchorCandidates(body) {
+  const text = String(body || '');
+  // A substitution rule names alternatives to prefer or avoid, so its symbols are expected to be
+  // external and resolving one would anchor the rule to the thing it tells you NOT to use.
+  if (/\b(?:instead of|rather than|in place of|prefer\b[^.]*\bover\b)/i.test(text)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const m of text.replace(/`/g, ' ').matchAll(CANDIDATE_RE)) {
+    const w = m[0];
+    // A dotted name is namespaced and external (`console.log`); CANDIDATE_RE already splits those,
+    // so the guard is on the character before the match rather than inside it.
+    if (m.index > 0 && text[m.index - 1] === '.') continue;
+    if (w.length < 4 || seen.has(w) || !SHAPED_ID_RE.test(w)) continue;
+    seen.add(w);
+    out.push(w);
+  }
+  return out.slice(0, 8);
+}
+
+// The one case where a body earns a declaration anchor: exactly one candidate resolves, and it
+// resolves unambiguously. Two resolving names means the sentence mentions two declarations and
+// nothing here can say which it is ABOUT; an ambiguous single name is the same problem one level
+// down. Both leave the caller's grain alone, because a wrong anchor expires a rule that is still
+// true — strictly worse than never checking it.
+function soleReferent(graphDb, branch, body, fileHint) {
+  const named = anchorCandidates(body);
+  if (!named.length) return null;
+  const hits = named
+    .map((n) => locateSymbol(graphDb, branch, { symbol: n, fileHint }))
+    .filter((h) => h.found);
+  if (hits.length !== 1 || hits[0].ambiguous !== 0) return null;
+  return hits[0].node;
+}
+
+function symbolTarget(repoId, repoRoot, node) {
+  return {
+    repo_id: repoId,
+    file_path: node.file_path,
+    start_line: node.start_line,
+    end_line: node.end_line,
+    abs_path: repoRoot ? `${repoRoot}/${node.file_path}` : null,
+    named_node: node,
+  };
 }
 
 function targetFor({ graphDb, branch, repoId, repoRoot, symbol, file, body = '' }) {
@@ -112,6 +177,15 @@ function targetFor({ graphDb, branch, repoId, repoRoot, symbol, file, body = '' 
     if (!canonical && graphDb && branch) {
       return { anchored: false, ambiguous: 0, missing: 'file', target: repoTarget(repoId) };
     }
+    // A file hint is a floor, not a ceiling. Naming the file the rule lives in must not COST the
+    // caller the finer anchor — resolving the body's referent inside that file is strictly safer
+    // than the whole-repo lookup an unhinted body gets, because the hint bounds the candidates.
+    if (graphDb && branch) {
+      const node = soleReferent(graphDb, branch, body, canonical || fileHint);
+      if (node) {
+        return { anchored: true, ambiguous: 0, target: symbolTarget(repoId, repoRoot, node), resolved: node };
+      }
+    }
     return {
       anchored: true,
       ambiguous: 0,
@@ -144,34 +218,22 @@ function targetFor({ graphDb, branch, repoId, repoRoot, symbol, file, body = '' 
       const substitution = /\b(?:instead of|rather than|in place of|prefer\b[^.]*\bover\b)/i.test(String(body));
       const named = substitution ? []
         : extractReferents(String(body)).symbols.filter((n) => !n.includes('.')).slice(0, 5);
+      // DEMOTION reads only the narrow list, and must keep doing so. It fires on a name the writer
+      // deliberately marked as code, so its absence from the graph is evidence the code is gone.
+      // An identifier-shaped word in plain prose carries no such intent — "we use CommonJS
+      // everywhere" would demote a perfectly true repo-wide rule to a stale-instruction warning.
       if (named.length) {
-        const hits = named
-          .map((n) => ({ name: n, hit: locateSymbol(graphDb, branch, { symbol: n, fileHint: null }) }))
-          .filter((r) => r.hit.found);
-        if (!hits.length) {
+        const resolvable = named
+          .some((n) => locateSymbol(graphDb, branch, { symbol: n, fileHint: null }).found);
+        if (!resolvable) {
           return { anchored: false, ambiguous: 0, missing: 'symbol', target: repoTarget(repoId) };
         }
-        // One named declaration resolving to one place is the only case where the rule's SUBJECT is
-        // not a guess, so it is the only case that earns a symbol anchor. Two resolving names means
-        // the sentence mentions two declarations and nothing here can say which it is ABOUT; an
-        // ambiguous single name is the same problem one level down. Both keep repo grain, because a
-        // wrong anchor expires a rule that is still true — strictly worse than never checking it.
-        if (hits.length === 1 && hits[0].hit.ambiguous === 0) {
-          const node = hits[0].hit.node;
-          return {
-            anchored: true,
-            ambiguous: 0,
-            target: {
-              repo_id: repoId,
-              file_path: node.file_path,
-              start_line: node.start_line,
-              end_line: node.end_line,
-              abs_path: repoRoot ? `${repoRoot}/${node.file_path}` : null,
-              named_node: node,
-            },
-            resolved: node,
-          };
-        }
+      }
+      // PROMOTION reads the wide list. Being wrong here costs a coarser anchor, not a false
+      // warning, so it can afford candidates the audit cannot.
+      const node = soleReferent(graphDb, branch, body, null);
+      if (node) {
+        return { anchored: true, ambiguous: 0, target: symbolTarget(repoId, repoRoot, node), resolved: node };
       }
     } catch { /* referent audit is best-effort; a parse failure must not block a store */ }
   }
