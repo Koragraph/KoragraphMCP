@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "in.koragraph/koragraph",
+  "title": "Koragraph",
+  "description": "Local multi-repo code graph over MCP. Blast radius, call graphs, and memory anchored to code.",
+  "version": "0.1.4",
+  "websiteUrl": "https://www.koragraph.in",
+  "repository": {
+    "url": "https://github.com/Koragraph/KoragraphMCP",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "koragraphmcp",
+      "version": "0.1.4",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "mcp",
+          "description": "Runs the MCP server over stdio. The same binary also exposes ingest, doctor and serve."
+        }
+      ]
+    }
+  ]
+}
