@@ -108,11 +108,14 @@ function withoutCommentary(nodes) {
 function compactNodes(nodes) {
   const byFile = new Map();
   for (const n of nodes) {
-    const key = n.file || '';
-    if (!byFile.has(key)) byFile.set(key, []);
-    byFile.get(key).push(conciseSymbol(n));
+    // Grouping on path alone collapses two identically-pathed files from different repositories
+    // into one row — a real risk once a store holds sibling repos sharing a base package. The
+    // repo joins the grouping key so that case gets two rows, not one row silently mixing both.
+    const key = `${n.repo || ''} ${n.file || ''}`;
+    if (!byFile.has(key)) byFile.set(key, { file: n.file || '', repo: n.repo ?? null, symbols: [] });
+    byFile.get(key).symbols.push(conciseSymbol(n));
   }
-  return [...byFile].map(([file, symbols]) => ({ file, symbols }));
+  return [...byFile.values()];
 }
 
 // A node name is usually an identifier, but not always: a DOC node's name IS the docstring, and a
@@ -133,7 +136,10 @@ function compactRelation(r) {
   const out = { name: label(r.name), type: r.type, file: r.file, line: r.line, edge_type: r.edge_type };
   if (r.call_line != null) out.call_line = r.call_line;
   if (r.confidence_tier && r.confidence_tier !== 'EXTRACTED') out.confidence_tier = r.confidence_tier;
-  if (r.cross_repo) out.cross_repo = true;
+  // repo only earns its keep in concise mode when the relation actually crosses a repo boundary —
+  // in a single-repo store, or a same-repo relation, it is the same value on every row and adds
+  // nothing. Full mode (foldRelations) always carries it; this is the concise-mode gate.
+  if (r.cross_repo) { out.cross_repo = true; if (r.repo) out.repo = r.repo; }
   // Kept even in concise: "this call provably runs" is the strongest thing the tool can say.
   if (r.runtime_observed) out.runtime_observed = true;
   return out;
@@ -211,6 +217,10 @@ function shapeSearchNode(n) {
     name: label(n.name),
     type: n.node_type,
     file: n.file?.path ?? null,
+    // Which repository this result is from. Two results with an identical relative path can
+    // still be different files when the store holds sibling repos sharing a base package —
+    // without this, a caller has no per-row way to tell them apart.
+    repo: n.repo ?? null,
     line: n.start_line ?? null,
     end_line: n.end_line ?? null,
     purpose: label(n.summary) || null,
@@ -234,6 +244,7 @@ function foldRelations(result, targetId, direction) {
       name: node.name,
       type: node.node_type,
       file: node.file?.path ?? null,
+      repo: node.repo ?? null,
       line: node.start_line ?? null,
       edge_type: e.edge_type,
       direction,
@@ -629,20 +640,30 @@ async function changesWith(args, deps = {}) {
 // agent to run it before editing. One project is not an ambiguity. Two or more still is, and the
 // refusal is kept for that case, because guessing between them would silently answer about the
 // wrong repository.
-async function resolveProjectId(args, svc) {
+//
+// A NAME string tries repository scope first, exactly like resolveProjectScope (search_code,
+// neighbours, explore) already does — a project name only groups every repository it holds, so
+// resolving a repo's name straight to its project silently widened the walk back out to every
+// sibling repo in the same project. Returns branchIds when the name IS a repository, so the
+// caller can pass that straight to computeBlastRadius instead of a project id.
+async function resolveBlastRadiusScope(args, svc) {
   if (args.project_id != null) {
-    if (typeof args.project_id === 'number') return args.project_id;
+    if (typeof args.project_id === 'number') return { projectId: args.project_id, branchIds: null };
+    const branchIds = svc.branchIdsByRepoName
+      ? await svc.branchIdsByRepoName(LOCAL_ORG_ID, args.project_id)
+      : [];
+    if (branchIds && branchIds.length) return { projectId: null, branchIds, repoName: args.project_id };
     const id = await svc.projectIdByName(LOCAL_ORG_ID, args.project_id);
     if (id == null) {
       throw resolverError(400, 'project_not_found',
         `No project or repository named "${args.project_id}". Run overview to see the names in this store.`);
     }
-    return id;
+    return { projectId: id, branchIds: null };
   }
   const fromEnv = parseInt(process.env.KORAGRAPH_PROJECT_ID || '', 10);
-  if (Number.isFinite(fromEnv)) return fromEnv;
+  if (Number.isFinite(fromEnv)) return { projectId: fromEnv, branchIds: null };
   const sole = await svc.soleProjectIdForOrg(LOCAL_ORG_ID);
-  if (sole != null) return sole;
+  if (sole != null) return { projectId: sole, branchIds: null };
   throw resolverError(400, 'project_scope_required',
     'blast_radius needs a project scope: this store holds no project, or more than one, so there is nothing unambiguous to pick. Pass project_id, or set KORAGRAPH_PROJECT_ID in the environment the server runs in.');
 }
@@ -662,14 +683,15 @@ async function blastRadius(args, deps = {}) {
   // in ONE ingest call rather than one per file (see ensureFilesFresh's own comment).
   await freshnessOf(deps).ensureFilesFresh({ cwd: deps.cwd, files: args.files_changed });
   const t0 = Date.now();
-  const projectId = await resolveProjectId(args, svc);
+  const scope = await resolveBlastRadiusScope(args, svc);
   const detail = detailOf(args);
   const limit = args.limit ?? 25;
   const taskType = normaliseTaskType(args.task_type);
 
   const request = {
     orgId: LOCAL_ORG_ID,
-    projectId,
+    projectId: scope.projectId,
+    branchIds: scope.branchIds,
     filesChanged: args.files_changed,
     breadthCap: limit,
   };
@@ -691,11 +713,16 @@ async function blastRadius(args, deps = {}) {
     drop_reason: surface.drop_reason,
     max_depth: surface.max_depth,
     depth_reached: surface.depth_reached,
+    edge_types_included: surface.edge_types_included,
+    edge_types_excluded: surface.edge_types_excluded,
+    coverage_note: surface.coverage_note,
+    ...(surface.next_actions ? { next_actions: surface.next_actions } : {}),
     callers: (surface.callers || []).map((c) => ({
       node_id: c.node_id,
       name: c.name,
       type: c.node_type,
       file: c.file_path,
+      repo: c.repo ?? null,
       line: c.start_line,
       edge_type: c.edge_type,
       depth: c.depth,
@@ -712,7 +739,13 @@ async function blastRadius(args, deps = {}) {
     })),
     detail,
     task_type: taskType,
-    meta: { latency_ms: Date.now() - t0, project_id: projectId },
+    // `project_id` is null (not omitted) when the request scoped to one repository instead — a
+    // caller diffing the two must see the scope actually changed, not read the same key twice.
+    meta: {
+      latency_ms: Date.now() - t0,
+      project_id: scope.projectId,
+      ...(scope.repoName ? { repo_scoped: scope.repoName } : {}),
+    },
   };
   const allCallers = payload.callers;
   if (detail === 'concise') payload.callers = allCallers.slice(0, render.CONCISE_ROWS);
@@ -731,11 +764,14 @@ async function blastRadius(args, deps = {}) {
     callers_dropped: payload.callers_dropped,
     drop_reason: payload.drop_reason,
     depth_reached: payload.depth_reached,
+    edge_types_excluded: payload.edge_types_excluded,
+    coverage_note: payload.coverage_note,
+    ...(payload.next_actions ? { next_actions: payload.next_actions } : {}),
     annotation: payload.annotation,
     detail,
     task_type: taskType,
     callers: payload.callers.map((c) => ({
-      name: c.name, type: c.type, file: c.file, line: c.line, edge_type: c.edge_type,
+      name: c.name, type: c.type, file: c.file, repo: c.repo, line: c.line, edge_type: c.edge_type,
       depth: c.depth, is_test: c.is_test, relation: c.relation,
       ...(c.runtime_observed ? { runtime_observed: true } : {}),
     })),

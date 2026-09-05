@@ -519,7 +519,13 @@ function rememberFact(practiceDb, graphDb, opts = {}) {
     repoId = (repoRoot && identityOfCheckout(repoRoot)) || `local:${repoNameOf(repo) || repo}`;
   } else {
     ({ repoRoot, repoId } = repoIdentity(cwd));
-    if (!repoId) return rejected('not inside a git repository — pass "repo" to name the target repository explicitly');
+    if (!repoId) {
+      // Mirrors the named-repo-not-found message below: a caller with no cwd match has no cheap
+      // way to enumerate valid names besides a separate `overview` call, and finding that out only
+      // after a second failed `remember` is friction this one line removes.
+      const hint = graphDb ? ' — run overview to see the names in this store' : '';
+      return rejected(`not inside a git repository — pass "repo" to name the target repository explicitly${hint}`);
+    }
     if (graphDb) {
       try {
         branch = resolveBranch(graphDb, { repoId, repoName: repoNameOf(repoId), repoRoot });

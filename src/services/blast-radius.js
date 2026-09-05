@@ -122,7 +122,8 @@ async function queryCallers({ orgId, branchIds, targetNodeIds, db, edgeTypes = R
             caller.end_line,
             json_extract(COALESCE(NULLIF(caller.properties, ''), '{}'), '$.covered') AS covered,
             json_extract(COALESCE(NULLIF(e.properties, ''), '{}'), '$.runtime_observed') AS runtime_observed,
-            e.edge_type
+            e.edge_type,
+            r.name AS repo
        FROM edges e
        JOIN nodes changed ON changed.id = e.to_node_id
        JOIN nodes caller  ON caller.id  = e.from_node_id
@@ -188,6 +189,12 @@ function rankFrontier(callers) {
 async function computeBlastRadius({
   orgId,
   projectId,
+  // Pre-resolved branch ids narrow the walk to exactly one repository. When supplied, this wins
+  // over `projectId` — `projectId` in a multi-repo project scopes to every repository the project
+  // holds, which is a no-op for a caller trying to scope to just one of them (the eval's `project_id:
+  // "subscriptionservice"` request read every repo in the same project as the numeric id it already
+  // got with no scope at all — same result set, no error, no signal scoping had no effect).
+  branchIds: presetBranchIds,
   filesChanged = [],
   breadthCap = DEFAULT_BREADTH_CAP,
   maxDepth,
@@ -196,13 +203,15 @@ async function computeBlastRadius({
   db,
 }) {
   const _db = db || pool;
-  if (!orgId || !projectId) {
-    const err = new Error('computeBlastRadius requires orgId and projectId');
+  if (!orgId || (!projectId && !(presetBranchIds && presetBranchIds.length))) {
+    const err = new Error('computeBlastRadius requires orgId and (projectId or branchIds)');
     err.code = 'scope_context_missing';
     throw err;
   }
 
-  const branchIds = await resolveBranchIds({ orgId, projectId, db: _db });
+  const branchIds = presetBranchIds && presetBranchIds.length
+    ? presetBranchIds
+    : await resolveBranchIds({ orgId, projectId, db: _db });
   await assertImportReverseCoverage({ orgId, branchIds, db: _db });
   const changedNodeIds = await resolveChangedNodeIds({ orgId, branchIds, filesChanged, db: _db });
 
@@ -257,6 +266,10 @@ async function computeBlastRadius({
         name: caller.name,
         node_type: caller.node_type,
         file_path: caller.file_path,
+        // The repository this caller lives in — distinguishes two callers at the same relative
+        // path in different repos (a shared base package across sibling services, e.g.), which
+        // `file_path` alone cannot.
+        repo: caller.repo,
         start_line: caller.start_line,
         end_line: caller.end_line,
         edge_type: caller.edge_type,
@@ -291,6 +304,23 @@ async function computeBlastRadius({
     logger.info('blast_radius.frontier_cap', { org_id: orgId, project_id: projectId, ...t });
   }
 
+  // Coverage self-report: which edge types this walk actually followed, which of the tool's known
+  // reverse-edge types it left out, and — separate from either — what no edge type here can ever
+  // see. An eval against a real 9-repo store found a caller only reachable through a field/generic
+  // type reference (a `List<Subscription>` field), independently re-derived it with grep, and
+  // flagged that blast_radius gave no way to know a supplementary check might be worth running.
+  // These fields make that check unnecessary by default instead of something a caller has to
+  // discover by getting burned once.
+  const edgeTypesExcluded = REVERSE_EDGE_TYPES.filter((t) => !walkEdgeTypes.includes(t));
+  const nextActions = edgeTypesExcluded.length
+    ? [{
+      tool: 'grep',
+      reason: `This walk excluded ${edgeTypesExcluded.join(', ')} edges (narrowed by task_type "${taskType}"). `
+        + 'A caller relying only on this result for rename/delete safety should also text-search '
+        + 'the changed declarations’ names to catch dependents this walk could not reach.',
+    }]
+    : [];
+
   return {
     ...surface,
     changed_files: filesChanged,
@@ -303,6 +333,14 @@ async function computeBlastRadius({
     depth_reached: depthReached,
     frontier_cap: effectiveFrontierCap,
     frontier_truncations: frontierTruncations,
+    edge_types_included: walkEdgeTypes,
+    edge_types_excluded: edgeTypesExcluded,
+    // True regardless of which edge types were walked: none of them come from executing the code
+    // or resolving a string, so reflection, dynamic dispatch, and config/string-driven wiring
+    // (a class name read out of a YAML file, e.g.) are structurally invisible to this tool.
+    coverage_note: 'Structural walk only — reflection, dynamic dispatch, and string/config-driven '
+      + 'references (e.g. a class name read from a config file) are not captured by any edge type.',
+    ...(nextActions.length ? { next_actions: nextActions } : {}),
     ...(plan ? { task_type: taskType, edge_types: plan.edgeTypes, cochange_admitted: plan.cochange } : {}),
   };
 }

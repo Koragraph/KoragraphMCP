@@ -141,7 +141,8 @@ async function fetchNodes(nodeIds, orgId, branchIds = null) {
             n.start_line, n.end_line,
             f.path AS file_path,
             f.summary AS file_summary,
-            f.summary_source AS file_summary_status
+            f.summary_source AS file_summary_status,
+            r.name AS repo_name
      FROM nodes n
      JOIN repository_branches rb ON rb.id = n.repository_branch_id
      JOIN repositories r ON r.id = rb.repository_id
@@ -165,6 +166,10 @@ async function fetchNodes(nodeIds, orgId, branchIds = null) {
     file: r.file_path ? { path: r.file_path } : null,
     file_summary: r.file_summary || null,
     file_summary_status: r.file_summary_status || null,
+    // The repository this node lives in. Nodes from same-named files in different repositories
+    // (a shared base package across sibling services, e.g.) are otherwise indistinguishable by
+    // path alone — a real misattribution this caused in an eval against a 9-repo store.
+    repo: r.repo_name || null,
   }));
 }
 
@@ -526,7 +531,8 @@ async function getImpactSubgraphForOrg(orgId, args, deps = {}) {
      -- (No backticks in this comment: it lives inside a JS template literal.)
      SELECT n.id, n.name, n.node_type, n.confidence_tier, n.confidence,
             n.summary, n.canonical_key, n.properties, n.start_line, n.end_line,
-            f.path AS file_path, f.summary AS file_summary, f.summary_source AS file_summary_status
+            f.path AS file_path, f.summary AS file_summary, f.summary_source AS file_summary_status,
+            r.name AS repo_name
      FROM (SELECT DISTINCT node_id FROM impact) AS imp
      JOIN nodes n ON n.id = imp.node_id
      JOIN repository_branches rb ON rb.id = n.repository_branch_id
@@ -552,6 +558,7 @@ async function getImpactSubgraphForOrg(orgId, args, deps = {}) {
     file: r.file_path ? { path: r.file_path } : null,
     file_summary: r.file_summary || null,
     file_summary_status: r.file_summary_status || null,
+    repo: r.repo_name || null,
   }));
   const edges = await fetchEdgesBetween(nodeIds, excludeEdgeTypes);
 

@@ -266,6 +266,9 @@ function renderBlastRadius(payload) {
   if (payload.graph_coverage !== 'resolved') {
     lines.push('WARNING: none of these paths matched a file in the graph — check the path spelling, or re-ingest.');
   }
+  if (payload.edge_types_excluded && payload.edge_types_excluded.length) {
+    lines.push(`NOTE: this walk excluded ${payload.edge_types_excluded.join(', ')} edges — see \`next_actions\` for a supplementary check.`);
+  }
   const coupled = payload.callers.filter(isCoChange);
   if (coupled.length) {
     lines.push(`${coupled.length} row(s) below are CO_CHANGES — statistical git coupling, NOT callers. They are marked ~CO_CHANGES~ and nothing structural is implied.`);
