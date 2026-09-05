@@ -1,5 +1,6 @@
 {
   "name": "koragraphmcp",
+  "mcpName": "in.koragraph/koragraph",
   "version": "0.1.3",
   "description": "Local multi-repo code-graph MCP server",
   "license": "BUSL-1.1",
