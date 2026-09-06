@@ -13,7 +13,56 @@ const { policyFor } = require('./retrieval-policy');
 // not folded into the CALLS entry above — blast radius over-approximates
 // deliberately (a missed caller is worse here than an extra one), unlike
 // graph-tool-service.js's get_callers/get_callees, which default-exclude it.
-const REVERSE_EDGE_TYPES = ['CALLS', 'HEURISTIC_CALLS', 'IMPORTS', 'DEPENDS_ON', 'USES', 'REFERENCES', 'EXTENDS'];
+//
+// IMPLEMENTS sits beside EXTENDS for the same reason, covering the other direction of the same
+// hierarchy: IMPLEMENTS runs impl-class → interface (ast-extractor.js's Java plane), so walking it
+// in reverse surfaces every implementer when the CHANGED node is the interface itself — "this
+// interface method's signature moved, every class implementing it needs a look." It does NOT reach
+// a caller that only calls an IMPL through its interface type; that is a different gap, closed
+// below by seeding the walk with each changed method's OVERRIDES target.
+const REVERSE_EDGE_TYPES = ['CALLS', 'HEURISTIC_CALLS', 'IMPORTS', 'DEPENDS_ON', 'USES', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS'];
+
+// A caller typed against an interface (`private final OTPService svc;`) never gets a direct edge
+// into the impl's method at all — the CALLS edge resolves at the interface method
+// (OTPService.generateOtp), a different node than the one blast_radius is walking
+// (OTPServiceImpl.generateOtp). OVERRIDES (ingest.js#resolveOverrideEdges) is the one edge that
+// already links them: childMethod -[OVERRIDES]-> parentMethod. Seeding the changed-node set with
+// each changed method's OVERRIDES target — transitively, for multi-level hierarchies — makes the
+// existing reverse walk find that caller for free: it is now looking for callers of the interface
+// method too, exactly as if the interface method had been the one that changed. This is seed
+// expansion, not a new edge type in the walk itself, because OVERRIDES' own direction (child →
+// parent) would put it backwards in REVERSE_EDGE_TYPES — it would surface an override as a
+// "caller" of the method it overrides, which over-reports unrelated implementers as callers of
+// each other. Bounded to guard against a pathological override chain; real class hierarchies are
+// never this deep.
+const MAX_OVERRIDE_HOPS = 8;
+
+async function expandThroughOverrides({ orgId, branchIds, nodeIds, db }) {
+  if (!branchIds.length || !nodeIds.length) return nodeIds;
+  const seen = new Set(nodeIds);
+  let frontier = nodeIds;
+  for (let hop = 0; hop < MAX_OVERRIDE_HOPS && frontier.length; hop += 1) {
+    const { rows } = await db.query(
+      `SELECT DISTINCT e.to_node_id AS parent_id
+         FROM edges e
+         JOIN nodes child ON child.id = e.from_node_id
+         JOIN repository_branches rb ON rb.id = child.repository_branch_id
+         JOIN repositories r ON r.id = rb.repository_id
+         JOIN projects p ON p.id = r.project_id
+        WHERE p.org_id = $1
+          AND child.repository_branch_id IN (SELECT value FROM json_each($2))
+          AND e.edge_type = 'OVERRIDES'
+          AND e.from_node_id IN (SELECT value FROM json_each($3))`,
+      [orgId, branchIds, frontier],
+    );
+    const fresh = rows.map((r) => r.parent_id).filter((id) => !seen.has(id));
+    if (!fresh.length) break;
+    for (const id of fresh) seen.add(id);
+    frontier = fresh;
+  }
+  return [...seen];
+}
+
 const DEFAULT_BREADTH_CAP = 25;
 const MAX_DEPTH = 2;
 
@@ -214,6 +263,11 @@ async function computeBlastRadius({
     : await resolveBranchIds({ orgId, projectId, db: _db });
   await assertImportReverseCoverage({ orgId, branchIds, db: _db });
   const changedNodeIds = await resolveChangedNodeIds({ orgId, branchIds, filesChanged, db: _db });
+  // The walk's actual seed set: `changedNodeIds` plus, transitively, any interface/superclass
+  // method a changed method OVERRIDES. `changed_node_count`/`graph_coverage` below still report
+  // against `changedNodeIds` — the file diff didn't touch the interface, so it should not be
+  // counted as changed, only used to widen who counts as a caller.
+  const seedNodeIds = await expandThroughOverrides({ orgId, branchIds, nodeIds: changedNodeIds, db: _db });
 
   // An explicit `maxDepth` always wins; otherwise the task type's policy decides, and with no
   // task type the historical constant does. Existing callers pass neither and are unaffected.
@@ -232,11 +286,11 @@ async function computeBlastRadius({
     : (effectiveMaxDepth > MAX_DEPTH ? DEFAULT_FRONTIER_CAP : null);
   const walkEdgeTypes = plan ? plan.edgeTypes : REVERSE_EDGE_TYPES;
 
-  const seen = new Set(changedNodeIds);
+  const seen = new Set(seedNodeIds);
   const collected = [];
   const frontierTruncations = [];
 
-  let frontier = changedNodeIds;
+  let frontier = seedNodeIds;
   let depthReached = 0;
   for (let depth = 1; depth <= effectiveMaxDepth && frontier.length; depth += 1) {
     const edgeTypes = plan && plan.cochange && depth === 1
@@ -356,4 +410,5 @@ module.exports = {
   rankFrontier,
   looksLikeTestPath,
   assertImportReverseCoverage,
+  expandThroughOverrides,
 };

@@ -92,6 +92,77 @@ function toLines(content) {
   return (content || '').split('\n');
 }
 
+// Languages whose fallback (non-tree-sitter) passes below scan raw `content`/per-line text with
+// regexes rather than a parse tree — DI detection, barrel re-exports, Rust impl-for, and similar.
+// None of those regexes distinguish live code from a commented-out statement or a log-message
+// string that happens to contain a class name as plain text: a real repo produced a DEPENDS_ON
+// edge from `// log.info("calling " + OTPService...")`, a dead line matching nothing but its own
+// text. `stripComments` runs once before such a pass touches `content`, blanking comment bodies to
+// spaces so they cannot match a declaration/reference-shaped regex, while every caller's line and
+// offset math (`lineOf`, per-line regex loops, `content.slice(0, i)`) keeps working unmodified —
+// length and newline positions are preserved exactly, only comment TEXT is replaced.
+//
+// String-aware on purpose: a `//` inside a live string (a URL in a log message, e.g.) must not be
+// read as a comment start and truncate the rest of a real code line.
+const LINE_COMMENT_LANGS = new Set([
+  LANG.JAVA, LANG.JAVASCRIPT, LANG.TYPESCRIPT, LANG.GO, LANG.CSHARP, LANG.RUST, LANG.DART, LANG.PHP,
+]);
+const BLOCK_COMMENT_LANGS = LINE_COMMENT_LANGS;
+const HASH_COMMENT_LANGS = new Set([LANG.PYTHON, LANG.RUBY, LANG.PHP]);
+
+function stripComments(content, lang) {
+  const src = content || '';
+  const hasLine = LINE_COMMENT_LANGS.has(lang);
+  const hasBlock = BLOCK_COMMENT_LANGS.has(lang);
+  const hasHash = HASH_COMMENT_LANGS.has(lang);
+  if (!hasLine && !hasBlock && !hasHash) return src;
+
+  let out = '';
+  let quote = null; // '"', "'", or '`' while inside a string literal; null otherwise.
+  const n = src.length;
+  for (let i = 0; i < n; i += 1) {
+    const c = src[i];
+    if (quote) {
+      out += c;
+      // Swallow the escaped character too, so `\"` inside the string can't be misread as its end.
+      if (c === '\\' && i + 1 < n) { out += src[i + 1]; i += 1; }
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || (c === '`' && (lang === LANG.JAVASCRIPT || lang === LANG.TYPESCRIPT))) {
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (hasBlock && c === '/' && src[i + 1] === '*') {
+      out += '  ';
+      i += 2;
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      // `i` sits on the closing comment's `*` (or ran off the end of an unterminated comment).
+      // Blank both `*/` characters and land on the `/` — the loop's own `i += 1` then steps past
+      // it, so the next iteration resumes exactly one character after the comment, same as the
+      // unterminated case where `i` is already `n` and this block is skipped entirely.
+      if (i < n) { out += '  '; i += 1; }
+      continue;
+    }
+    if (hasLine && c === '/' && src[i + 1] === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i += 1; }
+      i -= 1;
+      continue;
+    }
+    if (hasHash && c === '#') {
+      while (i < n && src[i] !== '\n') { out += ' '; i += 1; }
+      i -= 1;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 // ─── Class extraction ─────────────────────────────────────────────────────────
 
 /**
@@ -1771,6 +1842,11 @@ const EXT_TO_AST_LANG = {
 // Returns [{ fieldType, annotation, line }].
 function extractInjectedDependencies(content, lang) {
   if (lang !== LANG.JAVA && lang !== LANG.CSHARP && lang !== LANG.TYPESCRIPT && lang !== LANG.PYTHON && lang !== LANG.GO) return [];
+  // Every pass below is a regex over raw text, so a commented-out field/constructor declaration —
+  // or, worse, a log message that merely contains a type name — would otherwise read as a real DI
+  // site and emit a DEPENDS_ON edge to nothing. `content` is stripped once, up front, rather than
+  // in each pass, so `lines`/line numbers derived from it are already comment-blind.
+  content = stripComments(content, lang);
   const lines = toLines(content);
   const results = [];
 
@@ -2121,10 +2197,14 @@ function buildRelativeImportEdges(content, filePath, lang, sourceNodeIndex) {
 
     // GQH-6a: re-export statements (barrel files) — `export { X } from './path'` and `export * from './path'`
     // These are not captured by extractImports() but are DEPENDS_ON edges (barrel → target module).
+    // Scanned on comment-stripped text only (not `content` itself, which extractImports() above
+    // still needs raw) — otherwise a commented-out `// export { X } from './path'` reads as a live
+    // barrel re-export and writes a DEPENDS_ON edge to a module the file does not actually use.
     const reExportRe = /export\s*(?:\{[^}]*\}|\*(?:\s+as\s+\w+)?)\s*from\s*['"]([.][^'"]+)['"]/gm;
     let reMatch;
     const seenReExportPaths = new Set();
-    while ((reMatch = reExportRe.exec(content)) !== null) {
+    const reExportScanText = stripComments(content, lang);
+    while ((reMatch = reExportRe.exec(reExportScanText)) !== null) {
       const relSource = reMatch[1];
       if ((relSource.startsWith('./') || relSource.startsWith('../')) && !seenReExportPaths.has(relSource)) {
         seenReExportPaths.add(relSource);
@@ -2156,7 +2236,12 @@ function extractReExportFacts(content, lang) {
   try {
     const reExportRe = /export\s*(?:\{([^}]*)\}|(\*)(?:\s+as\s+(\w+))?)\s*from\s*['"]([^'"]+)['"]/gm;
     let m;
-    while ((m = reExportRe.exec(content)) !== null) {
+    // Comment-stripped: this scan feeds `importFacts` → the FILE node's `properties.imports` →
+    // IMPORTS_SYMBOL/IMPORTS edges (ingest.js), one of blast_radius's own reverse-edge types. A
+    // commented-out `// export { X } from './y'` read as raw text otherwise resolves as a live
+    // re-export, and a file that never actually re-exports X reports as its dependent.
+    const scanText = stripComments(content, lang);
+    while ((m = reExportRe.exec(scanText)) !== null) {
       const namedList = m[1];
       const isStar = !!m[2];
       const starAlias = m[3];
@@ -8016,13 +8101,18 @@ function buildAstNodes(content, filePath, parserPath = filePath, opts = {}) {
   if (lang === LANG.RUST) {
     const implForRe = /^\s*(?:pub(?:\([\w:]+\))?\s+)?(?:unsafe\s+)?impl\s+([\w:]+(?:<[^>]+>)?)\s+for\s+(\w+)/gm;
     let im;
-    while ((im = implForRe.exec(content)) !== null) {
+    // Comment-stripped, not raw `content` — this regex is anchored to line-start (`^...impl`) and
+    // has no brace/body check, so a commented-out `// impl Foo for Bar` reads as a live trait
+    // implementation and writes an IMPLEMENTS edge nothing in the code actually declares. Length
+    // and newlines are unchanged by stripping, so `im.index`-based line math below still lines up.
+    const implForScanText = stripComments(content, lang);
+    while ((im = implForRe.exec(implForScanText)) !== null) {
       const traitName = im[1].split('::').pop().replace(/<.*>/, '').trim();
       const structName = im[2].trim();
       if (traitName && structName) {
         // Regex match, no AST node at hand — derive the line from the match offset
         // rather than leave it null when it's this cheap to compute.
-        const evidenceLine = content.slice(0, im.index).split('\n').length;
+        const evidenceLine = implForScanText.slice(0, im.index).split('\n').length;
         inheritanceEdges.push({ fromName: structName, toName: traitName, edgeType: 'IMPLEMENTS', evidenceLine });
       }
     }
@@ -9011,6 +9101,8 @@ module.exports = {
   awaitTreeSitterReady,
   EXT_TO_AST_LANG,
   extractInjectedDependencies,
+  extractReExportFacts,
+  stripComments,
   extractSqlReferences,
   extractSqlDeclarations,
   extractCRegex,

@@ -274,12 +274,22 @@ function sameDir(a, b) {
 
 function rankRelations(rels, anchorFile) {
   return [...rels].sort((a, b) => {
-    const ta = TIER_RANK[a.confidence_tier] ?? 1;
-    const tb = TIER_RANK[b.confidence_tier] ?? 1;
-    if (ta !== tb) return ta - tb;
+    // Weight BEFORE tier: CONTAINS/DEFINED_IN are structural bookkeeping that every declaration
+    // carries, so they are always written at tier EXTRACTED (ingest.js's file/directory-membership
+    // and DEFINED_IN writers hardcode it — resolving "this method belongs to this class" needs no
+    // inference). A real CALLS edge into another file routinely lands at a lower tier because it
+    // DOES need resolution. Ranking tier first let a 100%-certain structural fact permanently
+    // outrank a real but merely-inferred caller — on a real repo this buried the one genuine
+    // external caller of a class past the first 60 results, entirely behind its own methods and
+    // fields reporting themselves as "callers" via DEFINED_IN. Weight already encodes exactly this
+    // priority (CALLS/EXTENDS/IMPLEMENTS at 1.0 vs CONTAINS/DEFINED_IN at 0.5); tier now only breaks
+    // ties within the same weight class, e.g. preferring the more confident of two CALLS edges.
     const wa = weightOf(a.edge_type);
     const wb = weightOf(b.edge_type);
     if (wa !== wb) return wb - wa;
+    const ta = TIER_RANK[a.confidence_tier] ?? 1;
+    const tb = TIER_RANK[b.confidence_tier] ?? 1;
+    if (ta !== tb) return ta - tb;
     const la = a.file === anchorFile ? 0 : (sameDir(a.file, anchorFile) ? 1 : 2);
     const lb = b.file === anchorFile ? 0 : (sameDir(b.file, anchorFile) ? 1 : 2);
     if (la !== lb) return la - lb;
