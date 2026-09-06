@@ -1373,7 +1373,10 @@ const IMPORT_PATTERNS = {
   [LANG.JAVA]: [
     // import com.example.MyClass;
     // import static org.junit.Assert.*;
-    /^\s*import\s+(static\s+)?([\w.]+)(?:\.\*)?;/,
+    // Group 3 captures the wildcard suffix so buildImportInfo can tell a package/type import
+    // apart from one that brings everything in scope unqualified — no capturing group around
+    // it left the two indistinguishable from match[2] alone.
+    /^\s*import\s+(static\s+)?([\w.]+)(\.\*)?;/,
   ],
   [LANG.JAVASCRIPT]: [
     // import Foo from 'bar';                          (default)
@@ -1411,7 +1414,10 @@ const IMPORT_PATTERNS = {
   [LANG.CSHARP]: [
     // using System.Collections.Generic;
     // using Alias = System.Collections.Generic;
-    /^\s*using\s+(?:static\s+)?(?:(\w+)\s*=\s*)?([\w.]+)\s*;/,
+    // global using System.Reflection;  — a C# 10 file-spanning using (typically collected in a
+    // GlobalUsings.cs), which the compiler applies to every file in the assembly; the leading
+    // `global` modifier is optional so both plain and global usings are captured.
+    /^\s*(?:global\s+)?using\s+(?:static\s+)?(?:(\w+)\s*=\s*)?([\w.]+)\s*;/,
   ],
   [LANG.DART]: [
     // import 'package:foo/bar.dart';
@@ -1513,10 +1519,26 @@ function extractImports(content, language) {
 function buildImportInfo(match, lang, lineNum) {
   switch (lang) {
     case LANG.JAVA: {
+      const raw = match[2];
+      const isStatic = !!match[1];
+      const isWildcard = !!match[3];
+      const segs = raw.split('.').filter(Boolean);
+      // A wildcard (`import a.b.*;`) or a static-member import (`import static a.B.thing;`,
+      // `import static a.B.*;`) brings its target(s) into UNQUALIFIED scope — nobody writes
+      // `assertEquals.foo()` or `b.SomeClass` for the wildcard's package prefix — so neither
+      // ever doubles as a call-site qualifier the way a plain class import's simple name does.
+      // Only `import a.b.Foo;` makes `Foo` the receiver of `Foo.method()`, which is exactly the
+      // shape cross-repo-edge-resolver.js's qualified-call binder (aliasByFile) needs to bind a
+      // shared-library method call across repos — see extractors/java.js's `_importJava` for
+      // the tree-sitter equivalent of this same split.
+      const name = (!isWildcard && segs.length > 1) ? segs[segs.length - 1] : null;
+      const module = (!isWildcard && segs.length > 1) ? segs.slice(0, -1).join('.') : raw;
       return {
-        source: match[2],
+        source: raw,
         line: lineNum,
-        kind: match[1] ? 'static' : 'named',
+        kind: isStatic ? 'static' : 'named',
+        ...(name ? { name, module } : {}),
+        ...(name && !isStatic ? { alias: name } : {}),
       };
     }
     case LANG.JAVASCRIPT:
@@ -4961,6 +4983,59 @@ function csName(node) {
   return n ? n.text : null;
 }
 
+// The bare declared-type name a field's `field_type` text refers to: namespace qualifier,
+// generic arguments, nullable `?` and array `[]` markers all stripped, so a field typed
+// `IReadOnlyList<Widget>`, `Foo.Bar`, `Svc?` or `Item[]` reduces to `IReadOnlyList` / `Bar` /
+// `Svc` / `Item` — the name a CLASS node carries. A container generic (`List`) simply won't
+// match an in-repo class, so it resolves to nothing rather than to a wrong target.
+function csBareTypeName(text) {
+  if (!text) return null;
+  const bare = String(text).trim().split('<')[0].replace(/[?\[\]]/g, '').trim().split('.').pop();
+  return bare && /^[A-Za-z_@][\w]*$/.test(bare) ? bare : null;
+}
+
+// The declared types of a method's parameters and explicitly-typed locals, as [{name, type}] with
+// bare type names — the receiver vocabulary for a call inside the method body. Two shapes carry a
+// type without any flow analysis: a `parameter` (`FooService svc`) and a `variable_declaration`
+// whose `type` is written out (`FooService svc = ...`); a `var` local additionally yields its type
+// when the initialiser is a direct `new T(...)`. Anything needing real type inference (a `var`
+// bound to a method result, a chained expression) is left out rather than guessed. Consumed by
+// resolveViaReceiverType so `svc.DoWork()` binds to the parameter/local's type, not a name match.
+function csMethodLocalTypes(methodNode) {
+  const out = [];
+  const seen = new Set();
+  const add = (name, typeText) => {
+    if (!name || seen.has(name)) return;
+    const type = csBareTypeName(typeText);
+    if (!type) return;
+    seen.add(name);
+    out.push({ name, type });
+  };
+  const stack = [methodNode];
+  while (stack.length) {
+    const n = stack.pop();
+    for (const c of n.children) stack.push(c);
+    if (n.type === 'parameter') {
+      const nm = n.childForFieldName('name'); const ty = n.childForFieldName('type');
+      if (nm && ty) add(nm.text, ty.text);
+    } else if (n.type === 'variable_declaration') {
+      const ty = n.childForFieldName('type');
+      const typeText = ty ? ty.text : null;
+      for (const d of n.namedChildren) {
+        if (d.type !== 'variable_declarator') continue;
+        const nm = d.childForFieldName('name') || d.children.find((c) => c.type === 'identifier');
+        if (!nm) continue;
+        if (typeText && typeText !== 'var') { add(nm.text, typeText); continue; }
+        // `var x = new Foo(...)` — take the constructed type; skip any other `var` initialiser.
+        const val = d.childForFieldName('value') || d.namedChildren.find((c) => c.type.endsWith('expression'));
+        const created = val && val.type === 'object_creation_expression' ? val.childForFieldName('type') : null;
+        if (created) add(nm.text, created.text);
+      }
+    }
+  }
+  return out;
+}
+
 function extractCSharpTreeSitter(content, filePath) {
   const tree = _csParser.parse(content);
   const root = tree.rootNode;
@@ -5074,11 +5149,13 @@ function extractCSharpTreeSitter(content, filePath) {
       const params = plist ? plist.text.replace(/^\(|\)$/g, '').replace(/\s+/g, ' ').trim() : '';
       const attrs = csAttributes(node);
       const ret = node.childForFieldName('type');
+      const localTypes = csMethodLocalTypes(node);
       pushMember(node, base(node, {
         node_type: 'METHOD', name, kind: CS_CALLABLE_DECLS[t],
         signature: `${name}(${params})`, params,
         summary: `${name}(${params})${ret ? `: ${ret.text}` : ''}`,
         ...(attrs.length ? { decorators: attrs } : {}),
+        ...(localTypes.length ? { localTypes } : {}),
       }));
       continue;
     }
@@ -5138,6 +5215,22 @@ function extractCSharpTreeSitter(content, filePath) {
       fromIndex: entry.nodeIndex, toIndex: enclosing.nodeIndex,
       edgeType: 'DEFINED_IN', evidenceLine: entry.line ?? null,
     });
+    // Record each field/property's declared type on the owning CLASS node, so a member call
+    // through that field (`_svc.DoWork()` where `private FooService _svc;`) resolves to the
+    // method on the field's type rather than falling back to a branch-wide name match. Same
+    // {name, type} shape base.recordClassField uses for the config-driven extractors, read by
+    // resolution/facts.js into classFieldsById and consumed by resolve.js#resolveViaReceiverType.
+    const member = nodes[entry.nodeIndex];
+    if (member.node_type === 'FIELD' && member.field_type) {
+      const typeName = csBareTypeName(member.field_type);
+      if (typeName) {
+        const classNode = nodes[enclosing.nodeIndex];
+        if (!Array.isArray(classNode.fields)) classNode.fields = [];
+        if (!classNode.fields.some((f) => f.name === member.name)) {
+          classNode.fields.push({ name: member.name, type: typeName });
+        }
+      }
+    }
   }
 
   const callNodes = root.descendantsOfType('invocation_expression');
@@ -7479,6 +7572,17 @@ function buildAstNodes(content, filePath, parserPath = filePath, opts = {}) {
         for (const binding of imp.bindings) {
           importFacts.push({ name: binding.name, module: imp.source, alias: binding.alias, line: imp.line ?? null });
         }
+        continue;
+      }
+      // buildImportInfo already split a plain class import into {name: simple class name,
+      // module: package, alias: name} for LANG.JAVA — using imp.source for both name and module
+      // below would stamp the whole FQCN as the module, which still happens to prefix-match in
+      // cross-repo-edge-resolver.js's matchProvider(), but as `name` it can never equal a
+      // declared class's simple name, and as a derived alias
+      // (`imp.alias || module.split('/').pop()`) it can never equal a call's receiver either —
+      // silently breaking cross-repo symbol/qualified-call resolution for every Java import.
+      if (lang === LANG.JAVA && imp.name) {
+        importFacts.push({ name: imp.name, module: imp.module ?? null, alias: imp.alias ?? null, line: imp.line ?? null });
         continue;
       }
       importFacts.push({ name: imp.source, module: imp.source, alias: null, line: imp.line ?? null });

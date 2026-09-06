@@ -20,7 +20,15 @@ const { policyFor } = require('./retrieval-policy');
 // interface method's signature moved, every class implementing it needs a look." It does NOT reach
 // a caller that only calls an IMPL through its interface type; that is a different gap, closed
 // below by seeding the walk with each changed method's OVERRIDES target.
-const REVERSE_EDGE_TYPES = ['CALLS', 'HEURISTIC_CALLS', 'IMPORTS', 'DEPENDS_ON', 'USES', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS'];
+// IMPORTS_SYMBOL sits beside IMPORTS for the same reason CALLS pairs with HEURISTIC_CALLS: it is
+// the finer of the two grains cross-repo-edge-resolver.js's package plane writes (module IMPORTS,
+// symbol IMPORTS_SYMBOL), and per that resolver's own header comment it is "the one that carries
+// blast radius" — FILE(A) -[IMPORTS_SYMBOL]-> decl(B) is what makes "rename this exported
+// method/type, what breaks in the other repos" answerable at all. Without it here, every
+// cross-repo caller of a shared-library symbol the resolver correctly wired up was invisible to
+// this walk regardless — measured on a real 5-repo Maven project: `callers_found: 0` for every
+// shared-library method tested, though the edges existed in the graph.
+const REVERSE_EDGE_TYPES = ['CALLS', 'HEURISTIC_CALLS', 'IMPORTS', 'IMPORTS_SYMBOL', 'DEPENDS_ON', 'USES', 'REFERENCES', 'EXTENDS', 'IMPLEMENTS'];
 
 // A caller typed against an interface (`private final OTPService svc;`) never gets a direct edge
 // into the impl's method at all — the CALLS edge resolves at the interface method

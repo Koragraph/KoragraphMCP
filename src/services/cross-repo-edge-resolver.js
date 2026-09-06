@@ -1010,9 +1010,18 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
         if (!call || !call.receiver || !call.callee) continue;
         const bound = aliases.get(call.receiver);
         if (!bound) continue;
-        const hit = pickDecl(bound.provider.branchId, call.callee, bound.importPath, bound.provider);
-        if (hit) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, call.callee]);
-        else if (((declIndex.get(bound.provider.branchId) || new Map()).get(call.callee) || []).length) ambiguousSymbols++;
+        // Go/PHP/C#/Python/JS/TS have a dedicated tree-sitter pass here and `callee` is already
+        // the bare symbol name (`pflag.NewFlagSet` -> receiver "pflag", callee "NewFlagSet"). Java
+        // has none and falls back to ast-extractor.js's generic regex scanner
+        // (extractCallExpressionsFromBody), which folds receiver INTO callee
+        // (`ConfigUtils.getValue` -> callee "ConfigUtils.getValue") and carries the bare name
+        // separately as `method` — so looking declarations up by `callee` there can never match
+        // one, since every declaration is indexed by its bare name. Preferring `method` when
+        // present fixes the Java shape without touching the languages that never set it.
+        const symbolName = call.method || call.callee;
+        const hit = pickDecl(bound.provider.branchId, symbolName, bound.importPath, bound.provider);
+        if (hit) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, symbolName]);
+        else if (((declIndex.get(bound.provider.branchId) || new Map()).get(symbolName) || []).length) ambiguousSymbols++;
       }
 
       // Qualified references the extractor recorded for the whole file (ingest.js stamps

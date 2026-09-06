@@ -365,6 +365,11 @@ function _importJava(node) {
     return parts.join('.');
   }
 
+  // The `*` of a wildcard `import a.b.*;` is a separate `asterisk` sibling in this same
+  // children list, not part of the scoped_identifier/identifier chain walked below — so it
+  // must be detected here, once, rather than inside the loop where it can never be seen.
+  const isWildcard = (node.children || []).some((c) => c.type === 'asterisk');
+
   const out = [];
   for (const child of node.children || []) {
     if (child.type === 'scoped_identifier' || child.type === 'identifier') {
@@ -377,7 +382,18 @@ function _importJava(node) {
       if (!moduleName && segs.length > 1) { nameIdx = segs.length - 2; moduleName = segs[nameIdx]; }
       if (moduleName) {
         const pkgSegs = segs.slice(0, nameIdx);
-        out.push({ name: moduleName, module: pkgSegs.length ? pkgSegs.join('.') : undefined });
+        const fact = { name: moduleName, module: pkgSegs.length ? pkgSegs.join('.') : undefined };
+        // A single-class import (`import a.b.Foo;`) makes `Foo` the receiver of every
+        // qualified call to it (`Foo.method()`), the same role Go's package alias plays for
+        // `pflag.NewFlagSet`. cross-repo-edge-resolver.js's alias fallback
+        // (`imp.alias || module.split('/').pop()`) assumes a path-like module string and
+        // returns the whole dotted package for Java, which never matches any call receiver —
+        // so a qualified static/instance call into another repo's class silently never
+        // resolves. Setting alias explicitly here is what lets it. A wildcard import
+        // (`import a.b.*;`) brings a whole package into scope with no qualifier at all, so
+        // there is no alias to record.
+        if (!isWildcard) fact.alias = moduleName;
+        out.push(fact);
       }
     }
   }
