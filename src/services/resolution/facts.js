@@ -47,11 +47,12 @@ const { buildSymbolIndex, buildLabelIndex, buildDottedPathSuffixIndex } = requir
 // Three additions consumed by resolve.js#resolveViaReceiverType (typed-field receiver
 // inference):
 //   - `classFieldsById`: classNodeId -> its declared `fields` ([{name,type}],
-//     stamped by java.js/typescript.js onto the CLASS node's own top-level
-//     `fields` key, which lands in the DB as `properties.fields` — see
-//     ingest.js's fileScopedRows query, which selects it as `n.properties->
-//     'fields'`, a jsonb column the pg driver returns pre-parsed as a JS
-//     array, never a string needing a second JSON.parse).
+//     stamped by the extractors onto the CLASS node's own top-level `fields`
+//     key, which lands in `properties.fields`). ingest.js's fileScopedRows
+//     query selects it with `json_extract(properties,'$.fields')`, which the
+//     SQLite driver returns as JSON *text*, not an array — so it is parsed here
+//     (`_tryParseFields`); a fixture literal that already passes an array is
+//     used as-is. Either way `classFieldsById` populates against a real store.
 //   - `methodParentClassId`: methodNodeId -> its immediate owning CLASS id,
 //     from the DEFINED_IN edge the extraction plane already writes at
 //     METHOD-creation time (base.js#walkGeneric). Carried on each row as
@@ -64,6 +65,19 @@ const { buildSymbolIndex, buildLabelIndex, buildDottedPathSuffixIndex } = requir
 //     separate from `labelIndex` (built below, CLASS+METHOD mixed, normalised)
 //     because a same-named METHOD would otherwise falsely count as a second
 //     candidate for what should be a CLASS-only uniqueness check.
+// A class's `fields` (and a method's `localTypes`) column is either a parsed array (fixtures)
+// or its JSON text (a live SQLite `json_extract`). Returns the array, or null if absent or
+// malformed — never throws.
+function _tryParseFields(text) {
+  if (!text) return null;
+  try {
+    const v = JSON.parse(text);
+    return Array.isArray(v) ? v : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function buildFileScopedIndex(rows) {
   const declByFileAndName = new Map();  // filePath -> name -> [{id, type}]
   const importsByFile = new Map();      // filePath -> [{id, name}]
@@ -72,7 +86,9 @@ function buildFileScopedIndex(rows) {
   const symbolIndexRows = [];           // CLASS/METHOD rows fed to buildSymbolIndex
   const classFieldsById = new Map();    // classNodeId -> [{name, type}]
   const methodParentClassId = new Map(); // methodNodeId -> classNodeId
+  const methodLocalTypesById = new Map(); // methodNodeId -> [{name, type}] (params + typed locals)
   const classNodesByName = new Map();   // exact CLASS name -> [{id, filePath}]
+  const classBasesByName = new Map();   // exact CLASS name -> [baseTypeName] (for receiver-type chain walk)
 
   for (const r of rows || []) {
     if (!r || !r.file_path) continue;
@@ -80,13 +96,25 @@ function buildFileScopedIndex(rows) {
     knownFilePaths.add(r.file_path);
 
     if (r.node_type === 'CLASS') {
-      if (Array.isArray(r.fields) && r.fields.length) classFieldsById.set(r.id, r.fields);
+      const flds = typeof r.fields === 'string' ? _tryParseFields(r.fields) : r.fields;
+      if (Array.isArray(flds) && flds.length) classFieldsById.set(r.id, flds);
       const entry = { id: r.id, filePath: r.file_path };
       const list = classNodesByName.get(r.name);
       if (list) list.push(entry); else classNodesByName.set(r.name, [entry]);
+      const bases = typeof r.bases === 'string' ? _tryParseFields(r.bases) : r.bases;
+      if (Array.isArray(bases) && bases.length && !classBasesByName.has(r.name)) {
+        classBasesByName.set(r.name, bases.filter((b) => typeof b === 'string'));
+      }
     }
     if (r.node_type === 'METHOD' && (r.parent_class_id !== undefined && r.parent_class_id !== null)) {
       methodParentClassId.set(r.id, r.parent_class_id);
+    }
+    if (r.node_type === 'METHOD') {
+      // Parameter/local declared types (same text-or-array duality as `fields`), so a call
+      // through a parameter or local (`svc.DoWork()` where `svc` is a `FooService` parameter)
+      // resolves to the receiver's declared type.
+      const lts = typeof r.local_types === 'string' ? _tryParseFields(r.local_types) : r.local_types;
+      if (Array.isArray(lts) && lts.length) methodLocalTypesById.set(r.id, lts);
     }
 
     // Keyed on "any row carrying import evidence", not a hardcoded
@@ -150,7 +178,7 @@ function buildFileScopedIndex(rows) {
 
   return {
     declByFileAndName, importsByFile, fileById, knownFilePaths, symbolIndex, labelIndex, dottedPathSuffixIndex,
-    classFieldsById, methodParentClassId, classNodesByName,
+    classFieldsById, methodParentClassId, methodLocalTypesById, classNodesByName, classBasesByName,
   };
 }
 

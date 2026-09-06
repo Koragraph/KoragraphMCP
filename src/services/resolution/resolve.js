@@ -233,13 +233,25 @@ function resolveViaReceiverType(fromNodeId, receiverName, calleeName, fileIndex)
   const fieldName = _fieldNameFromReceiver(receiverName);
   if (!fieldName) return null;
 
-  const classId = fileIndex.methodParentClassId && fileIndex.methodParentClassId.get(fromNodeId);
-  if (classId === undefined || classId === null) return null;
-  const fields = fileIndex.classFieldsById && fileIndex.classFieldsById.get(classId);
-  if (!fields || !fields.length) return null;
-  const field = fields.find((f) => f && f.name === fieldName);
-  if (!field || !field.type) return null;
-  const typeName = field.type;
+  // The receiver's declared type, looked up in the narrowest scope first: the caller method's
+  // own parameters and locals, then the enclosing class's fields. Both are declared types (no
+  // flow analysis) — a parameter `FooService svc` and a field `private FooService _svc` are the
+  // same kind of evidence for what `svc.DoWork()` targets.
+  let typeName = null;
+  const locals = fileIndex.methodLocalTypesById && fileIndex.methodLocalTypesById.get(fromNodeId);
+  if (locals && locals.length) {
+    const local = locals.find((l) => l && l.name === fieldName);
+    if (local && local.type) typeName = local.type;
+  }
+  if (!typeName) {
+    const classId = fileIndex.methodParentClassId && fileIndex.methodParentClassId.get(fromNodeId);
+    if (classId === undefined || classId === null) return null;
+    const fields = fileIndex.classFieldsById && fileIndex.classFieldsById.get(classId);
+    if (!fields || !fields.length) return null;
+    const field = fields.find((f) => f && f.name === fieldName);
+    if (!field || !field.type) return null;
+    typeName = field.type;
+  }
 
   // Tier 3: caller's own file imports the field's declared type.
   const fromFilePath = fileIndex.fileById.get(fromNodeId);
@@ -265,6 +277,35 @@ function resolveViaReceiverType(fromNodeId, receiverName, calleeName, fileIndex)
     const decls = typeFilePath && fileIndex.declByFileAndName.get(typeFilePath)?.get(calleeName);
     if (decls && decls.length === 1 && decls[0].id !== fromNodeId) {
       return { targetId: decls[0].id, resolution: 'receiver_type_global' };
+    }
+  }
+
+  // Tier 5: the member is declared on a BASE of the receiver's type, not the type itself — the
+  // common OO shape (`reader.Read()` where `reader: JsonTextReader` and `Read` lives on the base
+  // `JsonReader`, in another file). Walk the receiver type's base chain by name, taking the first
+  // base that is a unique CLASS whose file uniquely declares `calleeName`. Bounded depth and a
+  // visited set guard deep hierarchies and cycles; uniqueness at each step keeps it from guessing.
+  const basesOf = fileIndex.classBasesByName;
+  if (basesOf) {
+    const seen = new Set([typeName]);
+    let frontier = basesOf.get(typeName) || [];
+    for (let depth = 0; depth < 6 && frontier.length; depth++) {
+      const next = [];
+      for (const baseName of frontier) {
+        if (seen.has(baseName)) continue;
+        seen.add(baseName);
+        const baseClasses = fileIndex.classNodesByName && fileIndex.classNodesByName.get(baseName);
+        if (baseClasses && baseClasses.length === 1) {
+          const bf = baseClasses[0].filePath;
+          const decls = bf && fileIndex.declByFileAndName.get(bf)?.get(calleeName);
+          if (decls && decls.length === 1 && decls[0].id !== fromNodeId) {
+            return { targetId: decls[0].id, resolution: 'receiver_type_global' };
+          }
+        }
+        const bb = basesOf.get(baseName);
+        if (bb) next.push(...bb);
+      }
+      frontier = next;
     }
   }
   return null;

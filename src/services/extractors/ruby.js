@@ -345,8 +345,13 @@ function _resolveRubyDirectives(root, result) {
             if (seenEdges.has(key)) continue;
             seenEdges.add(key);
             result.edges.push({ from: ownerIdx, to: targetIdx, edge_type: 'EMBEDS', resolution: 'same_file', evidence_line: line });
-          } else if (targetIdx === undefined) {
-            addImport(name, line);
+          } else if (targetIdx === undefined && ownerIdx !== undefined) {
+            // A cross-file mixin (`include Foo` where Foo is declared in another file) is the same
+            // "gains another type's members" relation as the same-file case above — an EMBEDS edge,
+            // resolved branch-wide by name — not a require-style import. `include`/`extend` are not
+            // `require`, so recording them as imports both misreports the import plane and never
+            // matches a real import target; branch-wide EMBEDS is the honest home for them.
+            result.unresolvedInheritance.push({ fromIndex: ownerIdx, toName: name, edge_type: 'EMBEDS' });
           }
         }
       }

@@ -2514,6 +2514,15 @@ function parseErrorRatio(root, length) {
 // grammar and 530 by the scanner and appears as two methods. Across the C# development corpus
 // that is 538 fabricated method nodes, and each one also lands on the wrong line, so it costs
 // precision and line accuracy at once. Containment is the rule the tolerance was approximating.
+// Control-flow / statement keywords that a line-based regex scanner can mis-read as a method
+// declaration (`if (cond)` looks like `<type> if(...)`). No language declares a method with one of
+// these bare names, so dropping them from a merged plane only ever removes a false positive.
+const _MERGE_KEYWORD_NONNAMES = new Set([
+  'if', 'else', 'for', 'foreach', 'while', 'do', 'switch', 'case', 'catch', 'try', 'finally',
+  'return', 'throw', 'using', 'lock', 'fixed', 'checked', 'unchecked', 'break', 'continue',
+  'goto', 'yield', 'when', 'default',
+]);
+
 function mergeDegradedPlanes(primary, secondary) {
   const nodes = [...(primary.nodes || [])];
   const seen = new Map();
@@ -2531,8 +2540,11 @@ function mergeDegradedPlanes(primary, secondary) {
     add(n);
     nodes.push(n);
   }
+  // A regex scanner recovering declarations from a partly-degraded parse can mis-read a control
+  // keyword as a method (`if (...)` → a method named `if`); drop those — they are never real.
+  const filtered = nodes.filter((n) => !_MERGE_KEYWORD_NONNAMES.has(n.name));
   return {
-    nodes,
+    nodes: filtered,
     structuralEdges: primary.structuralEdges || [],
     inheritanceEdges: primary.inheritanceEdges || [],
     relativeImportEdges: primary.relativeImportEdges || [],
@@ -3881,8 +3893,12 @@ function extractPhpTreeSitter(content, filePath) {
   // Call sites, for ingest.js#resolveCallExpressionEdges. The receiver is kept: it is what
   // makes the resolver's class-qualified branch reachable.
   const callNodes = [];
+  // `new Foo(...)` constructs Foo — a call to its constructor, and a common call shape. Captured
+  // alongside method/function/scoped calls, with the constructed class's bare name (namespace
+  // qualifier stripped) as the callee.
   for (const ty of ['function_call_expression', 'member_call_expression',
-                    'nullsafe_member_call_expression', 'scoped_call_expression']) {
+                    'nullsafe_member_call_expression', 'scoped_call_expression',
+                    'object_creation_expression']) {
     for (const n of root.descendantsOfType(ty)) callNodes.push(n);
   }
   for (const me of methodEntries) {
@@ -3898,6 +3914,11 @@ function extractPhpTreeSitter(content, filePath) {
         if (fn && (fn.type === 'name' || fn.type === 'qualified_name')) {
           callee = fn.text.split('\\').pop();
         }
+      } else if (callNode.type === 'object_creation_expression') {
+        // The class being constructed is the first name/qualified_name child (`new Foo` /
+        // `new \Ns\Foo`); an anonymous class (`new class {}`) has none and is skipped.
+        const cls = (callNode.namedChildren || []).find((c) => c.type === 'name' || c.type === 'qualified_name');
+        if (cls) callee = cls.text.split('\\').pop();
       } else {
         const nm = callNode.childForFieldName('name');
         const obj = callNode.childForFieldName('object') || callNode.childForFieldName('scope');
@@ -5092,6 +5113,7 @@ function extractCSharpTreeSitter(content, filePath) {
       // every entry is EXTENDS unless it follows the `IName` interface convention. That
       // convention is near-universal in C# and is what the resolver has to work with.
       const bases = node.children.find((c) => c.type === 'base_list');
+      const baseNames = [];
       for (const b of (bases ? bases.namedChildren : [])) {
         // A `generic_name` base (`IList<T>`, `Collection<Foo>`) carries its identifier as a plain
         // child, not a `name` field, so read the inner identifier/qualified_name; the `<...>`
@@ -5101,12 +5123,18 @@ function extractCSharpTreeSitter(content, filePath) {
           : b);
         const toName = (raw && raw.text ? raw.text.split('.').pop() : '').trim();
         if (!toName || !/^[A-Za-z_@][\w]*$/.test(toName)) continue;
+        baseNames.push(toName);
         inheritanceEdges.push({
           fromIndex: typeIndex, toName,
           edgeType: /^I[A-Z]/.test(toName) ? 'IMPLEMENTS' : 'EXTENDS',
           evidenceLine: nd.line,
         });
       }
+      // Record base type names on the CLASS node so receiver-type call resolution can follow the
+      // inheritance chain: a call through a receiver typed `T` whose method is declared on a base
+      // of `T` (not `T` itself) resolves to the base's method. resolution/facts.js reads this into
+      // classBasesByName; resolve.js#resolveViaReceiverType walks it.
+      if (baseNames.length) nd.bases = baseNames;
 
       // A record's positional parameters declare real members, and there is no other syntax
       // that declares them — the same case as TypeScript's constructor parameter properties.
@@ -5234,6 +5262,11 @@ function extractCSharpTreeSitter(content, filePath) {
   }
 
   const callNodes = root.descendantsOfType('invocation_expression');
+  // `new Foo(...)` constructs Foo — a call to its constructor, and the most common call shape in
+  // OO C# (object construction). Captured alongside method invocations, with the constructed
+  // type's bare name as the callee (generics and namespace qualifier stripped, so `new List<T>()`
+  // -> List and `new A.B()` -> B).
+  const newNodes = root.descendantsOfType('object_creation_expression');
   for (const me of memberEntries) {
     const nd = nodes[me.nodeIndex];
     if (nd.node_type !== 'METHOD') continue;
@@ -5254,6 +5287,17 @@ function extractCSharpTreeSitter(content, filePath) {
       const receiver = fn.type === 'member_access_expression'
         ? (fn.childForFieldName('expression') || {}).text : null;
       callExprs.push(receiver ? { callee, line, receiver } : { callee, line });
+    }
+    for (const newNode of newNodes) {
+      if (innermostEntry(newNode, memberEntries) !== me) continue;
+      const typeNode = newNode.childForFieldName('type');
+      const callee = typeNode ? csBareTypeName(typeNode.text) : null;
+      if (!callee) continue;
+      const line = newNode.startPosition.row + 1;
+      const key = `${callee}:${line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      callExprs.push({ callee, line });
     }
     if (callExprs.length > 0) nd.callExpressions = callExprs;
   }

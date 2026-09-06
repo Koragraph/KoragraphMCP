@@ -2266,7 +2266,11 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
   const { rows: fileScopedRows } = await pool.query(
     `SELECT n.id, n.name, n.node_type, f.path AS file_path,
             json_extract(n.properties, '$.module') AS module, json_extract(n.properties, '$.alias') AS alias,
-            n.properties AS properties
+            json_extract(n.properties, '$.fields') AS fields, n.properties AS properties,
+            json_extract(n.properties, '$.localTypes') AS local_types,
+            json_extract(n.properties, '$.bases') AS bases,
+            (SELECT di.to_node_id FROM edges di
+             WHERE di.from_node_id = n.id AND di.edge_type = 'DEFINED_IN' LIMIT 1) AS parent_class_id
        FROM nodes n
        JOIN files f ON f.id = n.file_id
       WHERE n.repository_branch_id = $1 AND n.approval_status != 'ARCHIVED'
@@ -2391,9 +2395,21 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
       const hasDeclaredTypes = TYPED_CALL_EXTS.has(extOf(callerPath));
       const importHit = resolveViaImportEvidence(caller.id, rawCallee, fileIndex)
         || resolveViaModuleStem(caller.id, rawCallee, fileIndex, fileIndex.symbolIndex);
+      // A member call through a receiver whose declared type is known is proof, not a guess:
+      // `_svc.DoWork()` where `_svc` is a field/parameter typed `FooService` binds to
+      // FooService.DoWork. Ranked directly after import evidence and ahead of the branch-wide
+      // name match, so a typed receiver resolves precisely instead of falling through to a
+      // locality-narrowed name guess. resolveViaReceiverType returns a target only when the
+      // field's type and the member are both unique, so it cannot lower precision.
+      const receiverTypeHit = (!importHit && expr.receiver)
+        ? resolveViaReceiverType(caller.id, expr.receiver, rawCallee, fileIndex)
+        : null;
       if (importHit) {
         targets = [importHit.targetId];
         resolution = importHit.resolution;
+      } else if (receiverTypeHit) {
+        targets = [receiverTypeHit.targetId];
+        resolution = receiverTypeHit.resolution;
       } else if (rawCallee.includes('.')) {
         // Dotted callee (e.g. "userService.create"): use class-contextual map first.
         const parts = calleeLower.split('.');
