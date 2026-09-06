@@ -137,6 +137,28 @@ Report: nodes/edges indexed, whether the MCP connected, and KORAINIT's summary.
 
 ---
 
+## Accuracy
+
+**The most accurate local code graph.** Across all 12 languages — 3 pinned repositories each, every
+graph scored by an **independent compiler front-end** (CPython `ast`, `go/parser`, Roslyn, `syn`,
+`tsc`, Ripper, php-ast, ctags, `swiftc`), not the tool under test — koragraph **wins 34 of 39
+language×plane cells** against **CodeGraph**, **GitNexus** and **Graphify**.
+
+| Plane | koragraph leads |
+|---|---|
+| Declarations | 10 / 12 languages |
+| Imports | 7 / 9 |
+| Inheritance | **9 / 9** |
+| Calls | 8 / 9 |
+
+Call resolution holds **91–100% precision on every language**; where a competitor shows higher raw
+recall it is by over-emitting (CodeGraph reports **zero** Rust imports, and PHP imports at 57–72%
+precision). No LLM, no cloud — every number reproduces from
+[`test/benchmark`](test/benchmark) with a pinned corpus, pinned competitor versions and pinned
+oracles. Full per-language breakdown: [`test/benchmark/REPORT.md`](test/benchmark/REPORT.md).
+
+---
+
 ## The CLI
 
 Every command is `koragraph <command>`:
