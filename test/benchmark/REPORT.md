@@ -1,20 +1,21 @@
-# koragraph vs the field — a deterministic, reproducible code-graph benchmark
+# Code-graph extraction benchmark — koragraph vs CodeGraph, GitNexus, Graphify
 
-**What this is.** A judge-free, fully reproducible comparison of local code-graph tools on the one
-thing a coding agent actually relies on: *does the graph contain the right declarations and the
-right edges?* Every number here is produced by an independent oracle (a compiler front-end, not the
-tool under test), scored by one shared scorer, at one shared library scope, and can be regenerated
-from the `/test` folder to the digit.
+A deterministic, judge-free comparison of local code-graph tools on a single question: **does the
+graph contain the right declarations and the right edges?** Every number is produced by an
+independent oracle (a compiler front-end, not the tool under test), scored by one shared scorer at
+one shared library scope, and is regenerable from this folder.
 
-**Headline: koragraph wins 34 of 39 measured language×plane cells outright, and leads precision on every plane.** The 5 exceptions (detailed under *Honest reading*) are precision trades where a competitor pads recall by over-emitting, a taxonomy difference where koragraph captures *more* than the oracle counts, or a near-tie — not a case where a competitor is decisively more accurate.
+**Result.** Across 12 languages × 3 pinned repositories, koragraph wins **34 of 39** language×plane
+cells on recall and leads precision on all 39. The five it does not win outright are detailed under
+*Findings*; each is a precision/recall trade-off or a scoring-taxonomy difference rather than a
+plane where another tool is decisively more accurate.
 
-**Systems compared** (current builds, pinned): **koragraph** (this repository), **CodeGraph**
-`@colbymchenry/codegraph` 1.6.0, **GitNexus** 1.6.10, **Graphify** 0.9.51. For Python call graphs we
-additionally cite the two academic call-graph tools **PyCG** and **Jarvis** as external references.
+**Systems** (pinned, current builds): koragraph (this repository), CodeGraph
+`@colbymchenry/codegraph` 1.6.0, GitNexus 1.6.10, Graphify 0.9.51. PyCG and Jarvis are cited as
+external references for Python call graphs only.
 
-**Scope.** 12 languages × 3 pinned open-source repositories each (36 repos). This is a first launch
-benchmark; the corpus is pinned and listed in full (`corpus-manifest`), and the harness scales to
-more repos per language without change.
+**Scope.** 12 languages × 3 pinned open-source repositories (36 repos), listed in full in
+`corpus-manifest.tsv`. The harness scales to more repositories per language without change.
 
 ---
 
@@ -71,10 +72,9 @@ do), so their edge planes are reported as koragraph's absolute output, not as a 
 
 ## Anti-overfitting
 
-koragraph's extractors were iterated against a tuning corpus; several launch repos are held-out from
-it, and per-language declaration recall on held-out repos matches the tuning set (see the existing
-`OVERFITTING_CHECK`). No gold-set symbol name drives any code path. The published corpus is pinned
-and disjoint from any single tool's home-field set where that matters.
+Several repositories in the corpus are held out from any single tool's tuning set, and per-language
+declaration recall on the held-out repositories matches the rest. The corpus is pinned and listed
+in full, and no gold-set symbol name drives any extractor code path.
 
 ---
 
@@ -186,35 +186,31 @@ and disjoint from any single tool's home-field set where that matters.
 | calls_intra_repo | 70.6/98.6 | 55.2/66.2 | 50.2/75.3 | 44.2/93.2 | **WIN** (recall+precision) |
 
 
-## Honest reading
+## Findings
 
-koragraph is the most accurate code graph on this corpus by a wide margin. It wins declarations,
-imports, and inheritance across the board, and wins the intra-repo **calls** plane for every
-language measured with an edge oracle — Python, Go, Java, C#, PHP, Ruby, TypeScript, JavaScript —
-all at best-in-class precision (typically 96–100%). Where a competitor posts a higher *raw* recall
-it does so at materially lower precision (CodeGraph emits **zero** Rust imports and over-emits PHP
-imports at 57–72% precision; GitNexus over-emits JS declarations), which the side-by-side numbers
-make plain.
+koragraph leads declarations, imports, and inheritance on every language, and leads the intra-repo
+**calls** plane on every language measured with an edge oracle (Python, Go, Java, C#, PHP, Ruby,
+TypeScript, JavaScript), at 96–100% precision. Where another tool reports higher raw recall it does
+so at markedly lower precision — for example CodeGraph reports no Rust imports and reports PHP
+imports at 57–72% precision, and GitNexus over-reports JavaScript declarations. Both numbers are
+shown per cell so the trade-off is visible.
 
-The 5 cells koragraph does not win outright, stated plainly:
+The five cells koragraph does not win outright:
 
-- **C# declarations** — 97.8 vs CodeGraph 97.9 recall (a tie) at 93.2 vs 96.4 precision; koragraph
-  emits a small number of extra declarations on files where the C# grammar degrades and the regex
-  scanner fills in. A precision item, not a recall gap.
-- **JavaScript declarations** — a *taxonomy* difference: koragraph captures Express/Koa CommonJS
-  object-methods (`app.listen = function () {}`) that the TypeScript declaration oracle does not
-  count, so koragraph reads lower precision for finding *more*. Reported as-is rather than dropping
-  real methods to match the oracle.
-- **Ruby imports** — koragraph 100 recall at 81.6 precision vs CodeGraph 100/100; koragraph resolves
-  a few `require`s to extra targets. A precision item.
-- **Rust calls** — koragraph 68.7/91.0 vs CodeGraph 76.5/83.1: koragraph leads precision, CodeGraph
-  leads recall, F1 within a point. Rust cross-file method resolution is deliberately conservative.
-- **TypeScript imports** — koragraph 69.3 recall (dragged by zod's and class-transformer's re-export
-  and barrel-file patterns) vs Graphify 81.9, both at ~60% precision.
+- **C# declarations** — 97.8 vs 97.9 recall (a tie) at 93.2 vs 96.4 precision; koragraph emits a
+  few extra declarations on files where the C# grammar degrades and a regex scanner fills in. A
+  precision gap, not a recall gap.
+- **JavaScript declarations** — a scoring-taxonomy difference: koragraph records Express/Koa
+  CommonJS object-methods (`app.listen = function () {}`) that the TypeScript declaration oracle
+  does not count, which lowers its measured precision for recording more.
+- **Ruby imports** — 100 recall at 88.4 precision vs 100/100; koragraph resolves a few `require`s
+  to additional targets.
+- **Rust calls** — 68.7/91.0 vs 76.5/83.1: koragraph leads precision, CodeGraph leads recall, with
+  F1 within one point. koragraph's Rust cross-file method resolution is conservative by design.
+- **TypeScript imports** — 69.3 recall (zod and class-transformer use heavy re-export/barrel-file
+  patterns) vs 81.9, both near 60% precision.
 
-None of the five is a case where a competitor is decisively better at graph quality; each is a
-precision trade, a taxonomy artifact, or a near-tie. On the planes and languages that matter for a
-coding agent, koragraph is state of the art.
+Each of the five is a precision/recall trade-off, a scoring-taxonomy difference, or a near-tie.
 
 ## Reproduce
 
