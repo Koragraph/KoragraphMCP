@@ -1,0 +1,37 @@
+lang	repo	lib	remote	sha
+c	jansson	src	https://github.com/akheron/jansson.git	851a2145e3256f2e67e5dfe24b0e456bf198b741
+c	json-c		https://github.com/json-c/json-c.git	a0bfde7d0227633f66130530262f8aba1f73d62c
+c	zlib		https://github.com/madler/zlib.git	e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca
+cpp	fmt		https://github.com/fmtlib/fmt.git	bc82c408a6ac75d356396332b1e70793e86620ad
+cpp	json		https://github.com/nlohmann/json.git	c864bb36da3d35e406ea7cf98fae0f8a13a27383
+cpp	spdlog		https://github.com/gabime/spdlog.git	f5f173a1a57d0e2e0115f2ed71ee7ea316516853
+csharp	Newtonsoft.Json	Src/Newtonsoft.Json	https://github.com/JamesNK/Newtonsoft.Json	09bb545d72969ad7fb4ea07db0d5c34f4fc07877
+csharp	Polly	src	https://github.com/App-vNext/Polly	df539592cae769b858fd225b63bd13aa05481572
+csharp	serilog	src	https://github.com/serilog/serilog	49b5339ce85385dc52d4d8e8f2b8308becf23506
+go	cobra		https://github.com/spf13/cobra	adbc8813901bba65827259daa8e22ff94ec1f30e
+go	viper		https://github.com/spf13/viper	528f7416c4b56a4948673984b190bf8713f0c3c4
+go	zap		https://github.com/uber-go/zap	bbd4ecbd8760678fdbac94c93d9aca8069c83b2f
+java	commons-lang	src/main/java	https://github.com/apache/commons-lang	620f4ff4b4b0934e6dc46465fe5c92fd7e1fb997
+java	gson	gson/src/main/java	https://github.com/google/gson.git	b3f4ca20087f9066de4c340522ff84e0558e1ad1
+java	jsoup	src/main/java	https://github.com/jhy/jsoup	7860d088e044236e288c1f88a743b68b2a0edece
+javascript	commander	lib	https://github.com/tj/commander.js	ba6d13ddb4243e5913367734f8c159089ffe7834
+javascript	express	lib	https://github.com/expressjs/express.git	023767fe9872e029271df1418f73401bff20ff40
+javascript	koa	lib	https://github.com/koajs/koa.git	571938d1b42d5bbfbc4f203202e1095a63003f7e
+php	carbon	src	https://github.com/briannesbitt/Carbon	b13f05955dcfd7da71d60af745fd148cbdb73505
+php	guzzle	src	https://github.com/guzzle/guzzle	7b7b04a0f5a548bfe9ced4b56f5661deee229ac3
+php	monolog	src	https://github.com/Seldaek/monolog	2a50ae6f387a6da963bf2e2662803a01517a58ca
+python	flask	src/flask	https://github.com/pallets/flask	d318b683471101618febed18996405ad26462110
+python	httpx	httpx	https://github.com/encode/httpx	b5addb64f0161ff6bfe94c124ef76f6a1fba5254
+python	requests	src/requests	https://github.com/psf/requests	5460f467b02e49471c0fd6cfc9ca0adab6351f98
+ruby	faraday	lib	https://github.com/lostisland/faraday	9458f0426b9937a88b53223cfac6ce8d7c98d349
+ruby	rack	lib	https://github.com/rack/rack	8bf4eb078498edc9105fb04add80d89c5340e60b
+ruby	sinatra	lib	https://github.com/sinatra/sinatra	cb22afd7902b566b6eaba6c4ea89739494a65d12
+rust	anyhow	src	https://github.com/dtolnay/anyhow	c63b279f3f4af2b02ca6267d9eb47d6d10497f69
+rust	bytes	src	https://github.com/tokio-rs/bytes	d5c8ad3227afe459c09f1d0d85455abf00f0381a
+rust	clap	clap_builder/src	https://github.com/clap-rs/clap	6982fb1c98c7247e38a6d4f04191b94e30497e7b
+swift	SwiftyJSON	Source	https://github.com/SwiftyJSON/SwiftyJSON.git	3d2544101a03f22b2217d464dc7d359eeb86e159
+swift	swift-argument-parser	Sources	https://github.com/apple/swift-argument-parser.git	b53c2f0138a387f3c21d543d7bbfc9d008d6fb1d
+swift	swift-snapshot-testing	Sources	https://github.com/pointfreeco/swift-snapshot-testing.git	59a99c458de4d2dee580529b61b4f78dca7b7fa6
+typescript	class-transformer	src	https://github.com/typestack/class-transformer.git	a2734a5d154c9b0beb9a10555a04416bc371de06
+typescript	class-validator	src	https://github.com/typestack/class-validator	2e1a5c27dbd65b80e27fe96b49bd6e6641fa3603
+typescript	zod	packages/zod/src	https://github.com/colinhacks/zod	0a69bcb3d9554c6ec382ea9ba6b43c2421f3fa78
