@@ -1,221 +1,157 @@
 <div align="center">
 
-# koragraph
+<img src="assets/koragraph-logo.png" alt="koragraph" width="360">
 
-**A local, multi-repo code graph for your coding agent.**
+# The ultimate context layer for your AI coding agent.
 
+**Completely free. Runs entirely on your machine.**
+
+A local knowledge graph of every repo you point it at — plus a memory layer
+that knows when the code it remembers has changed.
+
+[![npm](https://img.shields.io/npm/v/koragraphmcp?color=cb3837&label=npm)](https://www.npmjs.com/package/koragraphmcp)
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 [![Node.js >=22](https://img.shields.io/badge/node-%3E%3D22-339933)](package.json)
-[![MCP compatible](https://img.shields.io/badge/MCP-compatible-66f8ff)](#tools)
-[![Website](https://img.shields.io/badge/website-koragraph.in-111111)](https://www.koragraph.in/)
+[![MCP compatible](https://img.shields.io/badge/MCP-compatible-66f8ff)](#the-tools)
+[![Website](https://img.shields.io/badge/koragraph.in-111111)](https://www.koragraph.in/)
 
-<img src="assets/koragraph-logo.png" alt="koragraph" width="480">
+<br>
+
+<img src="assets/demo.gif" alt="koragraph in action" width="820">
 
 </div>
 
-Point it at the repos you work on. koragraph reads them with tree-sitter, resolves calls, imports,
-inheritance, and cross-service edges, mines git history for what changes together, and remembers
-what you teach it. All local. No LLM, no cloud, no tokens.
-
----
-
-## See it
-
-Two planes, drawn together. Run `koragraph serve` for the whole repository's backbone,
-or `koragraph serve --focus <symbol>` for one symbol's neighbourhood, and open the local page it prints:
-
-<div align="center">
-<img src="assets/graph-serve.png" alt="koragraph serve — the code graph in cool colours, the memory layer as gold diamonds anchored to it" width="820">
-</div>
-
-The cool nodes are your **code** — declarations, and the calls, imports and cross-repo edges between
-them. The gold diamonds are koragraph's **memory** — the hazards, rules and corrections it has
-learned, each linked to the exact declaration it is about. One self-contained page, rendered
-locally; no network, no external assets.
-
----
-
-## Memory
-
-koragraph anchors facts to the **declaration** they're about, in a durable SQLite store
-(`~/.koragraph/practice.db`). Rename the code, the fact follows. Delete it, the fact orphans. No
-`CLAUDE.md` to maintain by hand.
-
-Already have a `CLAUDE.md` or `AGENTS.md`? Tell any coding agent:
-
-> Read [`KORAINIT.md`](KORAINIT.md) and follow it.
-
-It imports your instructions into memory, flags rules that reference code that's already gone, and
-supersedes rather than duplicates on a re-run.
-
----
-
-## Tools
-
-Nine MCP tools. Every one returns `file:line`, not pasted source. `detail: concise | full` on
-every call, concise by default. One tool writes.
-
-| Tool | What it's for |
-|---|---|
-| **`explore`** | Symbol or plain English. Ranked declarations plus source, callers, callees. |
-| **`blast_radius`** | Run before editing. What depends on this, and what has no test coverage. |
-| `search_code` | Locate a name in the graph, not raw text. |
-| `neighbours` | Callers and callees of one symbol. |
-| `changes_with` | What has historically changed together with a symbol. |
-| `file_symbols` | Declarations in one file. |
-| `overview` | Orient on the first turn. Store level index across repos. |
-| `recall` | A failed attempt and its fix, a hazard, a revert. |
-| `remember` | Save a durable, code anchored fact. The only writer. |
-
----
-
-## Graph
-
-Your services aren't one repo. koragraph resolves the edges between them, structurally, no LLM:
-
-- **HTTP calls.** A client call with a literal URL — `fetch`, `axios`, `requests`, `net/http`,
-  `HttpClient`, `reqwest`, `Guzzle`, and the rest, across all supported languages — resolves to the
-  `ENDPOINT` it targets in another repo, as a real `CALLS` edge.
-- **API contracts.** An `openapi.yaml` / Swagger document is parsed to the exact `ENDPOINT` it
-  declares, so a client resolves to the *declared* contract, not a guessed route.
-- **gRPC, Protobuf and Thrift.** A `.proto` or `.thrift` service to the stubs that call it, across
-  repos — the IDL *is* the cross-repo contract, and every operation in it is named unambiguously.
-- **Shared databases.** `CREATE TABLE` DDL becomes a `DB_TABLE` node; the services that touch it
-  become `READS_TABLE` / `WRITES_TABLE` edges. Change a column and see every other repo that reads
-  that table — the most invisible coupling in a system, made structural.
-- **Published packages.** An import resolves to the exporting repo's symbol. Solid for ES imports;
-  CommonJS resolves file level for now.
-- **Message topics.** Producer to consumer, including topic names bound to env vars.
-- **Infra wiring.** `docker-compose.yml` and `.env` become `SERVICE`, `DEPENDS_ON`, `USES_CONFIG`.
-  Framework routes become `ENDPOINT` and `HANDLED_BY`.
-
-**Co-change.** Git history mined at the function level: this function changes with that function.
-Surfaces in `blast_radius` and `changes_with`.
-
-**Runtime tracing.** `koragraph trace <path> -- <cmd>` runs your tests under `sys.setprofile` and
-folds real calls into the graph, tagged `[runtime-confirmed]`. Python today.
-
-**Local.** No model in the loop. Ingest the same repo twice, get the same graph.
-
----
-
-## Quickstart
-
-Node ≥ 22.
+## Install
 
 ```bash
 npm install -g koragraphmcp
-koragraph ingest /path/to/repo
-koragraph doctor          # prints the exact line to wire into your editor
-```
-
-Connect it to Claude Code — `-s user` makes it available in every project:
-
-```bash
+koragraph ingest /path/to/repo        # point it at as many repos as you like
 claude mcp add koragraph -s user -- koragraph mcp
 ```
 
-The store creates itself on first open: one SQLite file at `~/.koragraph/graph.db`. No server, no config.
+`koragraph doctor` checks the whole chain and prints the exact line for any editor.
 
-### Or hand it to your agent
-
-Paste this into any coding agent (Claude Code, Cursor, Copilot), from the repo you want indexed:
+**Or hand it to your agent** — paste this from the repo you want indexed, and it installs, indexes,
+wires itself in, and imports your existing rules:
 
 ```text
 Install koragraph and set it up for this repo, then report back:
 1. npm install -g koragraphmcp
 2. koragraph ingest .
-3. koragraph doctor — then run the `claude mcp add …` line it prints (or, if I'm not on Claude
-   Code, wire `koragraph mcp` into my editor's MCP config).
+3. koragraph doctor — then run the `claude mcp add …` line it prints (or wire `koragraph mcp` into
+   my editor's MCP config).
 4. Find KORAINIT.md in the installed package (`npm root -g`, then koragraphmcp/KORAINIT.md) and
    follow it — it imports my existing CLAUDE.md / AGENTS.md into memory, verified against the code.
 Report: nodes/edges indexed, whether the MCP connected, and KORAINIT's summary.
 ```
 
+<div align="center">
+<br><strong>Works with</strong><br><br>
+<img src="assets/logos/claude-code.png" height="34" alt="Claude Code">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/cursor.png" height="34" alt="Cursor">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/github-copilot.svg" height="34" alt="GitHub Copilot">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/windsurf.svg" height="34" alt="Windsurf">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/zed.png" height="34" alt="Zed">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/cline.png" height="34" alt="Cline">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/continue.png" height="34" alt="Continue">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/opencode.svg" height="34" alt="OpenCode">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/openai.svg" height="34" alt="Codex">&nbsp;&nbsp;&nbsp;
+<img src="assets/logos/antigravity.png" height="34" alt="Antigravity">
+</div>
+
+---
+
+## One map of everything you've built
+
+Koragraph turns every repo you point it at into **one live graph** — a resolved structure, with an
+edge only where there really is one.
+
+- Every service, file, endpoint, and table.
+- The real calls between them, resolved against the syntax tree — not guessed by name.
+- The edges that **cross a repo boundary**, where single-repo tools go quiet.
+
+<div align="center">
+<img src="assets/graph-serve.png" alt="koragraph serve" width="820">
+<br><em><code>koragraph serve</code> — code (cool nodes) and its memory (gold diamonds), one local page.</em>
+</div>
+
+---
+
+## A memory that knows when the code changed
+
+Everything your agent learns is saved locally, **anchored to the exact declaration** — not a line
+number. Rename the code and the fact follows; delete it and the fact retires. No `CLAUDE.md` to
+maintain, and it survives every upgrade.
+
+- **Failures and their fixes** — the fix surfaces before you hit the same wall twice.
+- **Hazards, rules, corrections** — stated once, honoured every session after.
+- **The "let's push this to Wednesday"** — deferrals and half-finished intent, parked against the
+  code and surfaced the moment you're back.
+
+---
+
+## Local. Deterministic. Zero tokens.
+
+No model, no network, no tokens — your code never leaves your machine. Ingest the same repo twice
+and get byte-for-byte the same graph.
+
+---
+
+## Measurably the most accurate — scored by the compilers
+
+Every graph is graded by an **independent compiler front-end** (CPython `ast`, `go/parser`, Roslyn,
+`syn`, `tsc`, Ripper, php-ast, ctags, `swiftc`) — *never the tool under test.* koragraph **wins 34 of
+39 language×plane cells, and leads precision on all 39.**
+
+Call-graph recall — the hardest plane:
+
+| Language | koragraph | CodeGraph | GitNexus | Graphify |
+|---|:--:|:--:|:--:|:--:|
+| JavaScript | **87.6** | 39.4 | 41.9 | 45.1 |
+| TypeScript | **70.6** | 55.2 | 50.2 | 44.2 |
+| Python | **86.1** | 85.1 | 54.6 | 53.3 |
+| Go | **89.1** | 85.0 | 63.8 | 65.3 |
+| Java | **86.0** | 73.1 | 68.6 | 53.5 |
+| C# | **83.6** | 79.8 | 50.5 | 54.4 |
+| PHP | **88.9** | 88.0 | 77.1 | 31.7 |
+| Ruby | **51.5** | 41.3 | 28.7 | 40.8 |
+| Rust | 68.7 | 76.5 | 48.9 | 47.6 |
+
+Reproduces from [`test/benchmark`](test/benchmark) — pinned corpus, pinned competitor versions,
+pinned oracles. Full breakdown in [`test/benchmark/REPORT.md`](test/benchmark/REPORT.md).
+
+---
+
+## The tools
+
+Nine MCP tools. Every one returns `file:line`, never pasted source. Exactly one writes.
+
+| Tool | What it's for |
+|---|---|
+| **`blast_radius`** | Run before editing — everything that depends on this, across repos, and what has no test coverage. |
+| **`explore`** | A symbol or plain English → ranked declarations, source, callers, callees. |
+| `search_code` | Find a name in the graph, not raw text. |
+| `neighbours` | Callers and callees of one symbol. |
+| `changes_with` | What has historically shipped together with a symbol. |
+| `file_symbols` | Declarations in one file. |
+| `overview` | Orient on turn one, across every repo. |
+| `recall` | A past failure and its fix, a hazard, an open loop. |
+| `remember` | Save a durable, code-anchored fact. The only writer. |
+
+Plus a CLI — `ingest`, `serve`, `status`, `doctor`, `diff`, `trace`, `hooks`, `practice`, `report`.
+
 ---
 
 ## Languages
 
-**12 fully-resolved languages**, tree-sitter throughout, each scored in the benchmark below:
-
 `c` · `c++` · `c#` · `go` · `java` · `javascript` · `php` · `python` · `ruby` · `rust` · `swift` ·
-`typescript / tsx`
-
-Plus experimental extractors for `kotlin` · `scala` · `elixir` · `solidity` · `vue` · `zig` ·
-`objective-c` · `ocaml` · `rescript` — parsed today, full call/import resolution in progress.
+`typescript / tsx` — fully resolved, tree-sitter throughout. Plus experimental `kotlin` · `scala` ·
+`elixir` · `solidity` · `vue` · `zig` · `objective-c` · `ocaml` · `rescript`.
 
 ---
-
-## Accuracy
-
-**The most accurate local code graph.** Across all 12 languages — 3 pinned repositories each, every
-graph scored by an **independent compiler front-end** (CPython `ast`, `go/parser`, Roslyn, `syn`,
-`tsc`, Ripper, php-ast, ctags, `swiftc`), not the tool under test — koragraph **wins 34 of 39
-language×plane cells** against **CodeGraph**, **GitNexus** and **Graphify**.
-
-| Plane | koragraph leads |
-|---|---|
-| Declarations | 10 / 12 languages |
-| Imports | 7 / 9 |
-| Inheritance | **9 / 9** |
-| Calls | 8 / 9 |
-
-Call resolution holds **91–100% precision on every language**; where a competitor shows higher raw
-recall it is by over-emitting (CodeGraph reports **zero** Rust imports, and PHP imports at 57–72%
-precision). No LLM, no cloud — every number reproduces from
-[`test/benchmark`](test/benchmark) with a pinned corpus, pinned competitor versions and pinned
-oracles. Full per-language breakdown: [`test/benchmark/REPORT.md`](test/benchmark/REPORT.md).
-
----
-
-## The CLI
-
-Every command is `koragraph <command>`:
-
-| Command | Does |
-|---|---|
-| `ingest <path...>` | Index one or more repos (`--watch` supported) |
-| `status` | What's in the graph, and when |
-| `report` | Markdown snapshot (also mermaid, graphml, dot, json, cypher) |
-| `serve` | Open an interactive picture of the graph in your browser (local, no network) |
-| `doctor` | End to end install check with a named remedy |
-| `cochange <symbol>` | What has historically changed with a symbol |
-| `diff` | What appeared or disappeared in the last re-index |
-| `trace <path> -- <cmd>` | Fold real calls into the graph (Python) |
-| `hooks` | Auto re-index on commit and checkout |
-| `practice <verb>` | Inspect, correct, maintain memory |
-| `mcp` | Serve the graph over MCP on stdio |
-
----
-
-## How it works
-
-1. **Walk** the repos, honouring `.gitignore`.
-2. **Extract** declarations with tree-sitter.
-3. **Resolve** calls, imports, inheritance, cross-service edges.
-4. **Mine** git history, optionally fold in runtime calls.
-5. **Serve** it all over MCP, locally.
-
-Re-indexing after a commit is **incremental** — only the files that changed since the last indexed
-commit are re-extracted and re-resolved, and a changed file's calls still resolve against the whole
-graph. Already-correct edges are left untouched. Two planes settle a little after the graph is
-queryable: co-change is mined in a background process, and a call that was previously ambiguous
-between several declarations is only reconsidered once its own file changes. `koragraph ingest
---full` re-resolves everything from scratch and sweeps both up — worth running after a large
-refactor, or on a schedule.
-
----
-
-## Requirements & status
-
-- **Node ≥ 22.**
-- Pure local tooling: better-sqlite3, tree-sitter. No LLM, no embedding dependency — no code on the
-  shipping path imports a model-provider SDK, calls a model, or touches the network. (A few columns
-  and code seams exist for an optional summarizer you could wire yourself; this distribution never
-  runs one, and summaries are derived structurally.)
-- **On npm.** `npm install -g koragraphmcp`.
 
 ## License
 
-[BUSL-1.1](LICENSE), free to use including at work. No commercial hosted or managed offering of
-koragraph itself. Converts to Apache-2.0 on the change date.
+[BUSL-1.1](LICENSE) — free to use, including at work. Converts to Apache-2.0 on the change date.
+
+<div align="center"><br><sub>Built by Akhil Katakam · Ethan Faleiro &nbsp;·&nbsp; founders@koragraph.in</sub></div>
