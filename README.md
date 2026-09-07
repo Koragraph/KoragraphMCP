@@ -27,8 +27,19 @@ claude mcp add koragraph -s user -- koragraph mcp
 
 `koragraph doctor` checks the whole chain and prints the exact line for any editor.
 
-**Or hand it to your agent.** Paste this from the repo you want indexed, and it installs, indexes,
-wires itself in, and imports your existing rules:
+### Then run KORAINIT in your editor
+
+This is the step that lights up the memory layer, so don't skip it. In your coding agent (Claude
+Code, Cursor, Windsurf, whatever you use), tell it:
+
+> ### "Read `KORAINIT.md` and follow it."
+
+It imports your existing `CLAUDE.md` / `AGENTS.md` into koragraph's memory, anchored to the code
+each rule is about, flags any rule that points at code that's already gone, and finishes wiring
+koragraph into the session. Run it once per project.
+
+**Prefer zero setup?** Hand the whole thing to your agent instead. Paste this from the repo you
+want indexed, and it installs, indexes, wires itself in, and runs KORAINIT for you:
 
 ```text
 Install koragraph and set it up for this repo, then report back:
