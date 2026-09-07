@@ -107,7 +107,32 @@ function detectJsRoutes(source) {
   return routes;
 }
 
+// Ruby route registrations — Sinatra's top-level DSL (`get "/orders/:id" do`) and Rails routes.rb
+// (`get "/orders/:id", to: "orders#show"`). Both spell a route as a bare verb keyword at statement
+// start followed by a quoted path beginning `/`. The statement-start anchor (the verb is NOT
+// preceded by a `.`) keeps a receiver call like `params.get("/x")` or `cache.delete(id)` out — the
+// same precision principle as the JS matcher, which is why this needs no framework-import gate.
+const RUBY_ROUTE_RE = /^[\t ]*(get|post|put|patch|delete)\s+(['"])(\/[^'"]*)\2/gim;
+
+function detectRubyRoutes(source) {
+  if (typeof source !== 'string' || !source) return [];
+  const routes = [];
+  const seen = new Set();
+  RUBY_ROUTE_RE.lastIndex = 0;
+  let m;
+  while ((m = RUBY_ROUTE_RE.exec(source)) !== null) {
+    const verb = m[1].toUpperCase();
+    const route = normalizeRoute(m[3]);
+    const key = `${verb} ${route}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    routes.push({ verb, route, rawPath: m[3], handler: null, index: m.index });
+  }
+  return routes;
+}
+
 module.exports = {
+  detectRubyRoutes,
   detectJsRoutes, routeObjectsIn, handlerFromArgs, normalizeRoute, importsRouterFramework,
   HTTP_VERBS,
 };

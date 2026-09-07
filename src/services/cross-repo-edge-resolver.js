@@ -51,7 +51,7 @@ const VERSION_RE = /^v\d+$/i;
 // trailing slashes, and version segments (v1, v2, v3 …).
 // A path-parameter segment in any of the spellings the extractors emit:
 //   Spring/OpenAPI {ownerId} · Express/Angular:ownerId · Flask/Django <int:pk> or <pk>
-const PLACEHOLDER_RE = /^(?:\{.*\}|:.+|<.*>)$/;
+const PLACEHOLDER_RE = /^(?:\{.*\}|:.+|<.*>|#\{.*\}|\$\{.*\})$/;
 
 function normalizePathSegments(rawPath) {
   if (!rawPath) return [];
@@ -878,12 +878,19 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
   // Without the Rust rule the whole Cargo plane scores zero: no crate is ever written with the
   // hyphen its own Cargo.toml uses.
   const foldSep = (v) => v.replace(/[-_]/g, '');
+  const firstSeg = (m) => m.split(/[/.]|::/)[0] || m;
   const prefixMatch = (moduleName, p, rustCrate) => {
     if (moduleName === p.name
         || moduleName.startsWith(p.name + '/')
         || moduleName.startsWith(p.name + '.')
         || moduleName.startsWith(p.name + '::')) return p.name.length;
     if (rustCrate && foldSep(rustCrate) === foldSep(p.name)) return p.name.length;
+    // Python/PEP 503 (and any ecosystem that swaps `-` and `_`): a distribution named `my-lib` in
+    // the manifest is imported in code as `my_lib`, and a submodule as `my_lib.utils`. Fold
+    // separators on the LEADING package segment so the two spellings of one identity bind.
+    // Additive — it only ever supplies a match the exact/prefix rules above missed, and only when
+    // the folded leading segments are equal (and non-trivial).
+    if (foldSep(firstSeg(moduleName)) === foldSep(p.name) && foldSep(p.name).length > 1) return p.name.length;
     return -1;
   };
 
@@ -1358,4 +1365,137 @@ async function resolveCrossRepoTopicEdges(projectId, _pool = pool) {
   };
 }
 
-module.exports = { resolveEdges, resolveCrossRepoPackageEdges, resolveCrossRepoGrpcEdges, resolveCrossRepoTopicEdges, normalizePathSegments, endpointNameToSegments, isSuffixMatch, extractPathFromTarget };
+// ─── Shared-database plane: services coupled by a common table ───────────────
+//
+// The fifth coupling style, and the one teams see least. Two services need no call, no contract
+// and no broker to be bound together — writing and reading the same database table couples them
+// just as tightly, and nothing in either repo's code names the other, so it stays invisible until
+// a schema change breaks a service nobody thought to check. koragraph already mints a DB_TABLE
+// node per repo (from CREATE TABLE DDL, ORM entities, and in-source SQL); this pass links the same
+// logical table across repos, so "change this column — who breaks?" reaches every service that
+// touches it, not just the ones in the table's home repo.
+//
+// Matching is recall-first: two DB_TABLE nodes with the same normalized name in different repos
+// are treated as the same table. That is deliberately loose —
+// `events` in an analytics service and `events` in a billing service may be unrelated — so every
+// edge carries a `shared_table_confidence` and a `match` reason in its properties. A bare-name
+// match is 'low'; a corroborating schema or database name on both sides lifts it. A consumer can
+// trust a high-confidence edge outright and treat a low one as a lead. The edge is written in both
+// directions: a shared table is a symmetric coupling and an impact query starts from either end.
+//
+// Order-independent by construction: it links every sibling in a name group to every other, so it
+// does not matter which repo was ingested first — unlike the by-name/lowest-id lookup the
+// per-repo reader resolver falls back to. Two `.sql`-only repos, which never linked before (their
+// table→file edges are branch-scoped), link here.
+async function resolveCrossRepoTableEdges(projectId, _pool = pool) {
+  const { rows: repoRows } = await _pool.query(
+    `SELECT r.id AS repo_id, rb.id AS branch_id
+       FROM repositories r
+       JOIN repository_branches rb ON rb.repository_id = r.id
+      WHERE r.project_id = $1 AND r.is_archived = false`,
+    [projectId],
+  );
+  if (repoRows.length < 2) return { tableEdges: 0, sharedTables: 0, readerEdges: 0, reason: 'single_repo' };
+  const branchIds = repoRows.map(r => r.branch_id);
+  const repoIds = [...new Set(repoRows.map(r => r.repo_id))];
+  const repoOfBranch = new Map(repoRows.map(r => [r.branch_id, r.repo_id]));
+
+  // Pass 1 — the reader/writer coupling. The per-repo SQL-reference resolver already points a
+  // `SELECT … FROM orders` in one repo at the DB_TABLE node another repo declared (it looks tables
+  // up project-wide by name), but it never flagged that edge as crossing a repo boundary — so the
+  // graph held the coupling without knowing it was cross-repo, and no impact query surfaced it.
+  // Mark every READS_TABLE / WRITES_TABLE edge whose reader and table live in different repos of
+  // this project, so "who reads this table across the fleet?" finds them. Confidence is 'low': the
+  // reader was bound to the table by name alone (recall-first), same policy as the rest of the plane.
+  const { rows: readerRows } = await _pool.query(
+    `SELECT e.id
+       FROM edges e
+       JOIN nodes fn ON fn.id = e.from_node_id
+       JOIN nodes tn ON tn.id = e.to_node_id
+       JOIN repository_branches fb ON fb.id = fn.repository_branch_id
+       JOIN repository_branches tb ON tb.id = tn.repository_branch_id
+      WHERE e.edge_type IN ('READS_TABLE', 'WRITES_TABLE')
+        AND e.is_cross_repo = 0
+        AND tn.node_type = 'DB_TABLE'
+        AND fb.repository_id <> tb.repository_id
+        AND fb.repository_id IN (SELECT value FROM json_each($1))
+        AND tb.repository_id IN (SELECT value FROM json_each($1))`,
+    [repoIds],
+  );
+  let readerEdges = 0;
+  if (readerRows.length) {
+    await _pool.query(
+      `UPDATE edges SET is_cross_repo = 1, resolution_tier = 2,
+         properties = json_patch(COALESCE(properties, '{}'),
+           json_object('resolution', 'cross_repo_shared_table', 'cross_repo_resolved', json('true'),
+                       'match', 'reader', 'shared_table_confidence', 'low'))
+        WHERE id IN (SELECT value FROM json_each($1))`,
+      [readerRows.map(r => r.id)],
+    );
+    readerEdges = readerRows.length;
+  }
+
+  // Pass 2 — the declaration coupling: two repos that each DECLARE a table of the same name.
+  const { rows: tableRows } = await _pool.query(
+    `SELECT n.id, n.name, n.repository_branch_id AS branch_id,
+            json_extract(n.properties, '$.schema')   AS schema_name,
+            json_extract(n.properties, '$.database') AS database_name
+       FROM nodes n
+      WHERE n.repository_branch_id IN (SELECT value FROM json_each($1))
+        AND n.node_type = 'DB_TABLE'
+        AND n.approval_status <> 'ARCHIVED'`,
+    [branchIds],
+  );
+  if (!tableRows.length) return { tableEdges: 0, sharedTables: 0, readerEdges, reason: readerEdges ? 'readers_only' : 'no_tables' };
+
+  // Group by normalized bare table name — the recall-first join key. A schema/catalog prefix
+  // (`analytics.events`) is stripped for grouping but kept on the row so it can corroborate.
+  const norm = (s) => (s || '').trim().toLowerCase().replace(/^.*\./, '');
+  const byName = new Map(); // name -> [{ id, branchId, schema, database }]
+  for (const t of tableRows) {
+    const key = norm(t.name);
+    if (!key) continue;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push({ id: t.id, branchId: t.branch_id, schema: t.schema_name, database: t.database_name });
+  }
+
+  const edges = new Map(); // "from|to" -> [from, to, confidence, match, name]
+  let sharedTables = 0, sameRepoOnly = 0;
+  for (const [name, group] of byName) {
+    if (new Set(group.map(g => repoOfBranch.get(g.branchId))).size < 2) { sameRepoOnly++; continue; }
+    sharedTables++;
+    for (const a of group) {
+      for (const b of group) {
+        if (a.id === b.id) continue;
+        if (repoOfBranch.get(a.branchId) === repoOfBranch.get(b.branchId)) continue; // link across repos only
+        // A name match is the floor. A schema or database that agrees on both sides corroborates
+        // it — same name AND same database is a strong signal these are one table; a bare name is
+        // a lead worth surfacing but not trusting blindly.
+        let match = 'name', confidence = 'low';
+        if (a.database && b.database && String(a.database).toLowerCase() === String(b.database).toLowerCase()) {
+          match = 'database'; confidence = 'high';
+        } else if (a.schema && b.schema && String(a.schema).toLowerCase() === String(b.schema).toLowerCase()) {
+          match = 'schema'; confidence = 'medium';
+        }
+        edges.set(`${a.id}|${b.id}`, [a.id, b.id, confidence, match, name]);
+      }
+    }
+  }
+
+  let written = 0;
+  if (edges.size) {
+    const pairs = [...edges.values()];
+    written = await bulkWrite(_pool,
+      `INSERT INTO edges (from_node_id, to_node_id, edge_type, is_cross_repo, confidence_tier, resolution_tier, properties)
+       VALUES ($1, $2, 'REFERENCES', true, 'INFERRED', 2,
+               json_object('resolution', 'cross_repo_shared_table', 'cross_repo_resolved', json('true'),
+                           'shared_table_confidence', $3, 'match', $4, 'via', $5))
+       ON CONFLICT DO NOTHING`,
+      pairs.map((p) => [p[0], p[1], p[2], p[3], p[4]]));
+  }
+
+  console.log(`[resolveCrossRepoTableEdges] project=${projectId} sharedTables=${sharedTables} tableEdges=${written}/${edges.size} readerEdges=${readerEdges} sameRepoOnly=${sameRepoOnly}`);
+  return { tableEdges: written, sharedTables, readerEdges, candidates: edges.size, sameRepoOnly };
+}
+
+module.exports = { resolveEdges, resolveCrossRepoPackageEdges, resolveCrossRepoGrpcEdges, resolveCrossRepoTopicEdges, resolveCrossRepoTableEdges, normalizePathSegments, endpointNameToSegments, isSuffixMatch, extractPathFromTarget };

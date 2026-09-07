@@ -8922,6 +8922,12 @@ async function _portedGenericResult(grammar, filePath, content) {
       nodes: result.nodes.map((n) => ({ ...n, _sourceFile: n._sourceFile || filePath, extractor_tier: 'treesitter' })),
       structuralEdges,
       importFacts: result.importFacts || [],
+      // Carry the content side-channels the ported extractor computed (base.js#walkGeneric) so a
+      // Ruby/Rust/Swift/Scala service's `SELECT … FROM orders` reaches the READS_TABLE resolver —
+      // without this the ported adapter silently dropped them and shared-DB coupling was invisible
+      // for every generic-grammar language.
+      sqlReferences: result.sqlReferences || [],
+      configValueRefs: result.configValueRefs || [],
       unresolvedCalls: (result.unresolvedCalls || [])
         .filter((c) => Number.isInteger(c.from) && c.calleeName)
         .map((c) => ({ fromIndex: c.from, calleeName: c.calleeName, line: c.line ?? null, edgeType: c.edgeType || 'CALLS' })),

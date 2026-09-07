@@ -76,7 +76,13 @@ Your services aren't one repo. koragraph resolves the edges between them, struct
 - **HTTP calls.** A client call with a literal URL — `fetch`, `axios`, `requests`, `net/http`,
   `HttpClient`, `reqwest`, `Guzzle`, and the rest, across all supported languages — resolves to the
   `ENDPOINT` it targets in another repo, as a real `CALLS` edge.
-- **gRPC and `.proto`.** A service to the stubs that call it, across repos.
+- **API contracts.** An `openapi.yaml` / Swagger document is parsed to the exact `ENDPOINT` it
+  declares, so a client resolves to the *declared* contract, not a guessed route.
+- **gRPC, Protobuf and Thrift.** A `.proto` or `.thrift` service to the stubs that call it, across
+  repos — the IDL *is* the cross-repo contract, and every operation in it is named unambiguously.
+- **Shared databases.** `CREATE TABLE` DDL becomes a `DB_TABLE` node; the services that touch it
+  become `READS_TABLE` / `WRITES_TABLE` edges. Change a column and see every other repo that reads
+  that table — the most invisible coupling in a system, made structural.
 - **Published packages.** An import resolves to the exporting repo's symbol. Solid for ES imports;
   CommonJS resolves file level for now.
 - **Message topics.** Producer to consumer, including topic names bound to env vars.
@@ -130,10 +136,13 @@ Report: nodes/edges indexed, whether the MCP connected, and KORAINIT's summary.
 
 ## Languages
 
-**12 main languages**, tree-sitter throughout, more in progress:
+**12 fully-resolved languages**, tree-sitter throughout, each scored in the benchmark below:
 
 `c` · `c++` · `c#` · `go` · `java` · `javascript` · `php` · `python` · `ruby` · `rust` · `swift` ·
 `typescript / tsx`
+
+Plus experimental extractors for `kotlin` · `scala` · `elixir` · `solidity` · `vue` · `zig` ·
+`objective-c` · `ocaml` · `rescript` — parsed today, full call/import resolution in progress.
 
 ---
 

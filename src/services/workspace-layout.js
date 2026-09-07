@@ -483,6 +483,18 @@ function detectPublishedModules(repoPath) {
   const composer = readJson(path.join(repoPath, 'composer.json'));
   if (composer) push(composer.name, 'composer', 'composer.json', '');
 
+  // Ruby: a *.gemspec at the repo root names the published gem (`spec.name = "my_gem"`); code
+  // consumes it as `require "my_gem"`, so the gem name IS the import identity.
+  try {
+    for (const e of fs.readdirSync(repoPath, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.gemspec')) {
+        const gs = readText(path.join(repoPath, e.name));
+        const m = gs && /\.name\s*=\s*["']([^"']+)["']/.exec(gs);
+        if (m) push(m[1], 'rubygems', e.name, '');
+      }
+    }
+  } catch (_) { /* degrade, never throw — a missing/odd repo dir just yields no gem identity */ }
+
   const seen = new Set();
   return out
     .filter((m) => (seen.has(m.name + '|' + m.subdir) ? false : seen.add(m.name + '|' + m.subdir)))

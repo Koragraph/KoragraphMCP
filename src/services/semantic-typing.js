@@ -375,6 +375,23 @@ function deriveSemanticNodes(astNodes, { structuralEdges = [], relPath = '', lan
     }
   }
 
+  // ── Ruby call-expression routes (Sinatra / Rails) ─────────────────────────
+  // Ruby web routes are neither method decorators nor `obj.verb(path)` calls — they are a bare
+  // top-level DSL statement (`get "/orders/:id" do`). Like the JS routers, framework-routes.js
+  // reads the raw source and returns them; each becomes an ENDPOINT so a client call from another
+  // repo has a route to resolve to.
+  if (source && lang === 'ruby' && !isTestFile) {
+    const { detectRubyRoutes } = require('./framework-routes');
+    const seen = new Set();
+    for (const r of detectRubyRoutes(source)) {
+      const key = `${r.verb} ${r.route}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      push(mkNode('ENDPOINT', key, `${r.verb} ${r.route} handled by a Ruby route`,
+        { http_method: r.verb, route: r.route, handler: null, framework: 'ruby_router' }), null, 'HANDLED_BY');
+    }
+  }
+
   // ── auth: a property on the method node, plus its evidence ─────────────────
   // Emitted as a patch list rather than a node — "this handler is role-guarded" is an
   // attribute of the handler, not an AUTH_PROTECTED_BY edge to a role string that resolves

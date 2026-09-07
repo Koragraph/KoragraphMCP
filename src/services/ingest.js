@@ -3511,14 +3511,20 @@ async function resolveHttpClientEdges(branchId, projectId, _pool = pool) {
   for (const n of callerNodes) repoByNodeId.set(n.id, n.repo_id);
   for (const ep of endpointNodes) repoByNodeId.set(ep.id, ep.repo_id);
 
-  // Build lookup: "VERB /path" → endpointId (lowercase both parts for matching)
+  // Build lookup: "VERB /path" → endpointId. Paths are normalized with the SAME segment
+  // canonicalizer the cross-repo resolver uses, so a path parameter matches regardless of spelling:
+  // a client's `/orders/{orderId}` (JS/Python f-string), a Flask route's `/orders/<int:order_id>`,
+  // an Express `/orders/:id` and a Spring `/orders/{id}` all reduce to `/orders/{}`. Without this,
+  // a client call and the route it targets differ by nothing but placeholder syntax and never bind.
+  const { normalizePathSegments } = require('./cross-repo-edge-resolver');
+  const normPath = (p) => '/' + normalizePathSegments(p || '').join('/');
   const endpointByKey = new Map();  // "get /api/users" → id
   const endpointByPath = new Map(); // "/api/users" → id (verb-free fallback)
   for (const ep of endpointNodes) {
     const parts = ep.name.split(' ');
     if (parts.length >= 2) {
       const verb = parts[0].toLowerCase();
-      const epPath = parts.slice(1).join(' ').toLowerCase();
+      const epPath = normPath(parts.slice(1).join(' '));
       endpointByKey.set(`${verb} ${epPath}`, ep.id);
       if (!endpointByPath.has(epPath)) endpointByPath.set(epPath, ep.id);
     }
@@ -3535,9 +3541,10 @@ async function resolveHttpClientEdges(branchId, projectId, _pool = pool) {
         if (!rawUrl) continue;
         const urlPath = _extractPath(rawUrl);
         if (!urlPath) continue;
-        const epId = (verb && endpointByKey.get(`${verb} ${urlPath}`)) || endpointByPath.get(urlPath);
+        const np = normPath(urlPath);
+        const epId = (verb && endpointByKey.get(`${verb} ${np}`)) || endpointByPath.get(np);
         if (epId && epId !== node.id) {
-          triples.set(`${node.id}|${epId}|CALLS`, [node.id, epId, 'CALLS', verb ? `${verb} ${urlPath}` : urlPath]);
+          triples.set(`${node.id}|${epId}|CALLS`, [node.id, epId, 'CALLS', verb ? `${verb} ${np}` : np]);
         }
       }
     }
@@ -3551,8 +3558,9 @@ async function resolveHttpClientEdges(branchId, projectId, _pool = pool) {
     if (Array.isArray(node.call_exprs)) {
       for (const ce of node.call_exprs) {
         if (!ce || !ce.httpTarget) continue;
-        const urlPath = _extractPath(ce.httpTarget);
-        if (!urlPath) continue;
+        const urlPathRaw = _extractPath(ce.httpTarget);
+        if (!urlPathRaw) continue;
+        const urlPath = normPath(urlPathRaw);
         const verb = (ce.httpVerb || '').toLowerCase();
         // Path-only matching is for when the verb is UNKNOWN, which is what httpVerbFromLine's own
         // comment says it returns null for. Falling back to it after a KNOWN verb missed bound
@@ -3655,6 +3663,10 @@ function _extractPath(rawUrl) {
   if (hostMatch) u = hostMatch[1];
   // Must start with / to be an absolute path
   if (!u.startsWith('/')) return null;
+  // Ruby string interpolation (`/orders/#{id}`) is a path PARAMETER, not a URL fragment — collapse
+  // it to `{}` before the `#` fragment-strip below would otherwise truncate the path at the `#`
+  // (turning `/orders/#{id}` into `/orders` and missing the route it targets).
+  u = u.replace(/#\{[^}]*\}/g, '{}');
   // Strip query string and fragment
   u = u.split('?')[0].split('#')[0].toLowerCase().replace(/\/$/, '');
   // Collapse a parameter segment to the same `{}` the ENDPOINT side already uses, so a client's
@@ -5797,7 +5809,7 @@ async function resolveProjectCrossRepoEdges(projectId, _pool = pool, options = {
     return { created: 0, skipped: 0, tierCount: 0 };
   }
 
-  const { resolveEdges, resolveCrossRepoPackageEdges, resolveCrossRepoGrpcEdges, resolveCrossRepoTopicEdges } = require('./cross-repo-edge-resolver');
+  const { resolveEdges, resolveCrossRepoPackageEdges, resolveCrossRepoGrpcEdges, resolveCrossRepoTopicEdges, resolveCrossRepoTableEdges } = require('./cross-repo-edge-resolver');
   const result = await resolveEdges(branchGroups);
   logger.info(`[resolveProjectCrossRepoEdges] projectId=${projectId} tiers=${result.tierCount} created=${result.created} skipped=${result.skipped} deleted=${result.deleted}`);
 
@@ -5828,6 +5840,16 @@ async function resolveProjectCrossRepoEdges(projectId, _pool = pool, options = {
   });
   result.topicPlane = topics;
   result.created += (topics.topicEdges || 0);
+
+  // The fifth: services coupled by a shared database table, which have no call, contract or broker
+  // between them at all — the least visible coupling of the five. Same project scope: a table's
+  // identity is a property of the schema the fleet shares, not of any one branch.
+  const tables = await resolveCrossRepoTableEdges(projectId, _pool).catch((err) => {
+    logger.error(`[resolveProjectCrossRepoEdges] shared-table plane failed: ${err.message}`);
+    return { tableEdges: 0 };
+  });
+  result.tablePlane = tables;
+  result.created += (tables.tableEdges || 0) + (tables.readerEdges || 0);
   return result;
 }
 

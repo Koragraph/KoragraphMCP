@@ -1356,6 +1356,17 @@ function walkGeneric(tree, source, config) {
   // ast-extractor.js#_stampPlane — applied here so the generic-grammar languages routed through this
   // walker (Ruby, Rust, Swift, Scala, …) get cross-repo HTTP edges too. Additive and idempotent.
   augmentHttpCallsAcrossLanguages(result.nodes, source);
+  // In-source SQL references (`SELECT … FROM orders`) are a content side-channel the tree-sitter
+  // planes compute via buildContentSideChannels, but the ported/generic result never carried them —
+  // so a Ruby/Rust/Swift/Scala service that reads another repo's table produced no READS_TABLE and
+  // the shared-database coupling was invisible for those languages. extractSqlReferences is pure
+  // string logic (language only steers the Java @Query path, irrelevant here), so a lazy require —
+  // base.js already lazily requires ast-extractor for wasm init — closes the gap uniformly.
+  try {
+    const { extractSqlReferences } = require('../ast-extractor');
+    const sqlRefs = extractSqlReferences(source, (config && config.language) || null);
+    if (sqlRefs && sqlRefs.length) result.sqlReferences = sqlRefs;
+  } catch (_) { /* additive side-channel — never fail extraction over it */ }
   validateOutput(result);
   return result;
 }
