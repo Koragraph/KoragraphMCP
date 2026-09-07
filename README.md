@@ -95,6 +95,10 @@ maintain, and it survives every upgrade.
 - **The "let's push this to Wednesday."** Deferrals and half-finished intent, parked against the
   code and surfaced the moment you're back.
 
+<div align="center">
+<img src="assets/memory-anchored.png" alt="Memory anchored to the code it is about" width="820">
+</div>
+
 ---
 
 ## Measurably the most accurate, scored by the compilers
