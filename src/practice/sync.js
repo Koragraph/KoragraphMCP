@@ -120,9 +120,10 @@ function ritualLines(db, { repoId, repoRoot }) {
 // obeys. Kept short because it is paid on every turn. Present even with zero rules, because the graph
 // tools are useful from the first minute, before any memory has accumulated.
 const USAGE_PRIMER = [
-  'USE KORAGRAPH AND KORAMEMORY. This repo has a resolved code graph and durable, code-anchored',
-  'memory as MCP tools — reach for them before grep, Read, or code comments. Each tool\'s own',
-  'description carries the details; use this as the index:',
+  'USE THE KORAGRAPH MCP TOOLS AS THIS REPO\'S SEARCH AND MEMORY LAYER. Before you grep, Read, or',
+  'open a file to learn what the code does, CALL KORAGRAPH: it exposes a resolved code graph plus',
+  'durable, code-anchored memory as MCP tools. Grep/Read/find are the fallback for when the graph has',
+  'no answer, not your first move. Each tool\'s own description carries the details; use this as the index:',
   '- `overview` — what matters in this repo when you have no name to start from.',
   '- `explore` — start here for the code itself, before grep/Read/find.',
   '- `search_code` — find a declaration by name, path, or description of what it does.',

@@ -19,10 +19,11 @@ const HOOK_WIRING = Object.freeze([
   ['UserPromptSubmit', 'context.mjs', null],
   ['PreToolUse', 'preflight.mjs', 'Bash|Edit|Write|MultiEdit|NotebookEdit'],
   // No matcher: this one has to see every tool name, including mcp__koragraph__* attempts (to mark
-  // the graph as "in use" and go quiet) and raw Bash/Grep/Read/Glob calls (to nudge toward the graph
-  // tools instead). A PreToolUse hook fires for every tool call regardless of which agent issued it,
-  // so — unlike SERVER_INSTRUCTIONS, which only reaches the top-level session — this is the one place
-  // that reaches a delegated subagent too. See nudge.mjs.
+  // the graph as "in use" and go quiet) and raw Bash/Grep/Read/Glob calls. A cold Grep/Glob (the
+  // harness's codebase-search primitives) is DENIED and redirected to explore/search_code; a Read or
+  // Bash search is only nudged. A PreToolUse hook fires for every tool call regardless of which agent
+  // issued it, so — unlike SERVER_INSTRUCTIONS, which only reaches the top-level session — this is the
+  // one place that reaches a delegated subagent too. See nudge.mjs.
   ['PreToolUse', 'nudge.mjs', null],
   ['PostToolUse', 'record.mjs', null],
   ['SessionEnd', 'session-end.mjs', null],

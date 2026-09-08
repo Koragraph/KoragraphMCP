@@ -15,6 +15,7 @@ const OPTIONS = {
   verbose: { type: 'boolean', default: false },
   watch: { type: 'boolean', default: false },
   interval: { type: 'string' },
+  'no-hooks': { type: 'boolean', default: false },
   help: { type: 'boolean', short: 'h', default: false },
 };
 
@@ -45,6 +46,9 @@ Options:
   --watch           Keep running and re-index automatically as files change (save, commit,
                     checkout, rebase). Foreground; Ctrl-C to stop. Indexes once first if needed.
   --interval <ms>   Poll interval for --watch (default 800). Higher is cheaper, lower is snappier.
+  --no-hooks        Skip wiring this repo's git re-index and Claude Code memory hooks. By default an
+                    ingest installs them (idempotently) so the graph stays fresh and the memory layer
+                    is live without a second command. Set KORAGRAPH_INGEST_NO_HOOKS=1 for the same.
   -h, --help        Show this help.
 
 A directory with no build marker (no package.json, pom.xml, pyproject.toml, go.mod, ...) is
@@ -78,6 +82,7 @@ function parse(argv) {
     verbose: values.verbose === true,
     watch: values.watch === true,
     interval,
+    noHooks: values['no-hooks'] === true,
   };
 }
 
@@ -321,11 +326,65 @@ async function run(parsed, io) {
     for (const line of hidden) err(`  ${line}\n`);
   }
 
-  revalidatePractice(err, parsed.paths.map(resolveRepoPath));
+  const repoPaths = parsed.paths.map(resolveRepoPath);
+  revalidatePractice(err, repoPaths);
+  wireHooks(err, repoPaths, parsed);
 
   if (failed) return EXIT.FAILURE;
   err('Done. Run `koragraph status` to see the graph, or `koragraph mcp` to serve it.\n');
   return EXIT.OK;
+}
+
+// Wire each ingested repo's hooks as part of the index, so the retrieval and memory layers are live
+// without a second command: git hooks that re-index when HEAD moves, and the Claude Code hooks that
+// deliver/capture memory and redirect a cold grep to the graph. Both installers are idempotent —
+// they refresh koragraph's own entries in place and never touch a hook the developer wrote — so
+// running this on every ingest also self-heals a settings.json that drifted, and stays quiet unless
+// something was newly installed. Best-effort throughout: a hook that cannot be written (not a git
+// checkout, an unwritable .claude) is skipped, never a reason to fail an index. Opt out per-run with
+// --no-hooks, or globally with KORAGRAPH_INGEST_NO_HOOKS.
+function wireHooks(err, repoPaths, parsed) {
+  if (parsed.noHooks || process.env.KORAGRAPH_INGEST_NO_HOOKS) return;
+  let gitHooks;
+  let claudeHooks;
+  try {
+    gitHooks = require('../services/git-hooks');
+    claudeHooks = require('../services/practice-hooks');
+  } catch (e) {
+    if (process.env.KORAGRAPH_CLI_TRACE) err(`Hook wiring skipped: ${e.message}\n`);
+    return;
+  }
+  const invocation = { nodeBin: process.execPath, cliEntry: path.resolve(__dirname, '../../bin/koragraph.js') };
+  const storeOpts = {
+    graphDb: process.env.KORAGRAPH_DB || null,
+    practiceDb: process.env.KORAGRAPH_PRACTICE_DB || null,
+  };
+  let installedGit = false;
+  let installedClaude = false;
+  for (const repoPath of repoPaths || []) {
+    try {
+      const r = gitHooks.installHooks(repoPath, { ...invocation, repoPath, project: parsed.project });
+      // git-hooks reports created/appended for a fresh write and unchanged for a refresh — announce
+      // only when something was actually newly written.
+      if ((r.results || []).some((h) => h.action !== 'unchanged')) installedGit = true;
+    } catch (e) {
+      if (process.env.KORAGRAPH_CLI_TRACE) err(`${repoPath}: git hooks skipped (${e.message.split('\n')[0]}).\n`);
+    }
+    try {
+      const c = claudeHooks.installClaudeHooks(repoPath, storeOpts);
+      if ((c.results || []).some((h) => h.action === 'installed')) installedClaude = true;
+    } catch (e) {
+      if (process.env.KORAGRAPH_CLI_TRACE) err(`${repoPath}: .claude/settings.json not written (${e.message.split('\n')[0]}).\n`);
+    }
+  }
+  // Announce only a first-time install; a refresh on an already-wired repo is silent so a routine
+  // re-ingest stays quiet. The one line names both what turned on and how to opt out next time.
+  if (installedGit || installedClaude) {
+    const parts = [];
+    if (installedGit) parts.push('auto-reindex on HEAD move');
+    if (installedClaude) parts.push('memory + graph-first search in Claude Code');
+    err(`Hooks wired: ${parts.join(', ')}. \`koragraph hooks status\` to inspect; re-ingest with --no-hooks to skip.\n`);
+  }
 }
 
 async function ingestAll(parsed, io) {

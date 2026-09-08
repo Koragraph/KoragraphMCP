@@ -171,8 +171,25 @@ only what is between its own markers and never touches the developer's own conte
 regenerates the block on every ingest — so a rule that expires when its code changes simply stops
 appearing there, with nothing to hand-maintain.
 
-Report which files were written (the command prints them). If the repo has no `CLAUDE.md` yet and
-the developer works in Claude Code, run `koragraph practice sync --agent claude` to create one.
+Report which files were written (the command prints them).
+
+**Then make sure YOUR OWN context file carries the block — you are an agent running right now, and
+this is not a Claude-only step.** `koragraph practice sync` always creates or refreshes the universal
+`AGENTS.md`, which most agents read (Cursor, Codex, Copilot, and others), so in a lot of setups you
+are already covered by the run above. But if the file *you* load first is a tool-specific one this
+repo does not have yet, create it now so the primer and rulebook land where you will actually read
+them next session:
+
+```
+koragraph practice sync --agent <you>
+```
+
+`<you>` is whichever agent you are: `agents` (AGENTS.md), `claude` (CLAUDE.md), `cursor`
+(`.cursor/rules/koragraph.mdc`), `cline` (`.clinerules/koragraph.md`), `windsurf` (`.windsurfrules`),
+`copilot` (`.github/copilot-instructions.md`), or `gemini` (GEMINI.md). Once a file exists and is
+managed, every later `koragraph ingest` refreshes it on its own, so it stays current with no
+hand-maintenance. The whole point is that whatever agent opens this repo keeps its own context file
+up to date, not just Claude's.
 
 ## 7. Report
 
