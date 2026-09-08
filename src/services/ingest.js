@@ -2401,8 +2401,16 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
       // name match, so a typed receiver resolves precisely instead of falling through to a
       // locality-narrowed name guess. resolveViaReceiverType returns a target only when the
       // field's type and the member are both unique, so it cannot lower precision.
+      // The extractors stamp a member call's callee as the DOTTED text ("svc.doWork") and carry the
+      // bare member name separately as `method`. resolveViaReceiverType looks its target up by the
+      // bare declaration name, so it must be handed `method`. Passing the dotted callee made every
+      // lookup miss, so the typed-receiver tier never fired and member calls fell through to the
+      // name-keyed branch below, which cannot tell two same-named methods on different receiver
+      // types apart. Fall back to the final dotted segment when an extractor set no `method`.
+      const bareCallee = expr.method
+        || (rawCallee.includes('.') ? rawCallee.slice(rawCallee.lastIndexOf('.') + 1) : rawCallee);
       const receiverTypeHit = (!importHit && expr.receiver)
-        ? resolveViaReceiverType(caller.id, expr.receiver, rawCallee, fileIndex)
+        ? resolveViaReceiverType(caller.id, expr.receiver, bareCallee, fileIndex)
         : null;
       if (importHit) {
         targets = [importHit.targetId];

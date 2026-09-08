@@ -78,6 +78,23 @@ function _tryParseFields(text) {
   }
 }
 
+// The bare declared-type name a field/parameter type text refers to, so it can be matched against
+// a CLASS name: generic arguments (`List<Foo>` -> `List`), array markers (`Foo[]` -> `Foo`) and a
+// namespace/package qualifier (`com.x.Foo` -> `Foo`) are all stripped. Returns null when what
+// remains is not a plain identifier (a primitive, a wildcard, a mangled fragment), so it never
+// contributes a junk type name to the receiver-type resolver.
+function _bareTypeName(raw) {
+  if (raw == null) return null;
+  let t = String(raw).trim();
+  const lt = t.indexOf('<');
+  if (lt >= 0) t = t.slice(0, lt);              // drop generic args and everything after
+  t = t.replace(/\[\s*\]/g, '').trim();          // drop array markers
+  const dot = t.lastIndexOf('.');
+  if (dot >= 0) t = t.slice(dot + 1);            // drop package/namespace qualifier
+  t = t.trim();
+  return /^[A-Za-z_$][\w$]*$/.test(t) ? t : null;
+}
+
 function buildFileScopedIndex(rows) {
   const declByFileAndName = new Map();  // filePath -> name -> [{id, type}]
   const importsByFile = new Map();      // filePath -> [{id, name}]
@@ -97,7 +114,18 @@ function buildFileScopedIndex(rows) {
 
     if (r.node_type === 'CLASS') {
       const flds = typeof r.fields === 'string' ? _tryParseFields(r.fields) : r.fields;
-      if (Array.isArray(flds) && flds.length) classFieldsById.set(r.id, flds);
+      if (Array.isArray(flds) && flds.length) {
+        // Merge, not overwrite: a FIELD row for this class may have been seen first (rows arrive in
+        // path/id order, and the fields-derived-from-FIELD-nodes branch below shares this map), so
+        // clobbering here would drop those. C# stamps the whole set on the class and reaches here
+        // with nothing to merge into; the merge is a no-op for it.
+        const existing = classFieldsById.get(r.id);
+        if (existing) {
+          for (const f of flds) if (f && !existing.some((e) => e && e.name === f.name)) existing.push(f);
+        } else {
+          classFieldsById.set(r.id, flds);
+        }
+      }
       const entry = { id: r.id, filePath: r.file_path };
       const list = classNodesByName.get(r.name);
       if (list) list.push(entry); else classNodesByName.set(r.name, [entry]);
@@ -115,6 +143,25 @@ function buildFileScopedIndex(rows) {
       // resolves to the receiver's declared type.
       const lts = typeof r.local_types === 'string' ? _tryParseFields(r.local_types) : r.local_types;
       if (Array.isArray(lts) && lts.length) methodLocalTypesById.set(r.id, lts);
+    }
+
+    // A field's declared type keyed on its owning CLASS, derived from the FIELD node's own
+    // `field_type` and DEFINED_IN owner (carried on the row as `parent_class_id`). The
+    // config-driven/regex extractors (Java, Go, Kotlin, PHP …) emit FIELD nodes with a declared
+    // type but never stamp the aggregate `fields` array on the CLASS node the way the C# pass does,
+    // so classFieldsById was empty for them and resolveViaReceiverType could not disambiguate a
+    // member call through a typed field. This reconstructs the same {name, type} shape from the
+    // FIELD nodes those extractors already produce, additive to the class-stamped path above.
+    if (r.node_type === 'FIELD' && r.parent_class_id !== undefined && r.parent_class_id !== null) {
+      const rawType = r.field_type != null
+        ? r.field_type
+        : (r.properties && typeof r.properties === 'object' ? r.properties.field_type : null);
+      const typeName = _bareTypeName(rawType);
+      if (typeName && r.name) {
+        let flds = classFieldsById.get(r.parent_class_id);
+        if (!flds) { flds = []; classFieldsById.set(r.parent_class_id, flds); }
+        if (!flds.some((f) => f && f.name === r.name)) flds.push({ name: r.name, type: typeName });
+      }
     }
 
     // Keyed on "any row carrying import evidence", not a hardcoded

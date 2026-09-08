@@ -821,9 +821,13 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
   // packages and the import path itself says which one is meant. Without this the resolver had
   // to refuse every such name as ambiguous: `afero.ReadFile` and `afero.Exists` are both
   // declared more than once across afero's packages, and both were silently dropped.
+  // Returns the declaration(s) a qualified reference binds to, as an array: [] to refuse, one
+  // element for a unique target, and, in the overload case, several elements when the name resolves
+  // to a set of overloads that are ONE logical member (same owning type, same file). Callers write
+  // one symbol edge per returned declaration.
   const pickDecl = (branchId, name, importPath, provider) => {
     const cands = (declIndex.get(branchId) || new Map()).get(name) || [];
-    if (cands.length <= 1) return cands.length === 1 ? cands[0] : null;
+    if (cands.length <= 1) return cands.length === 1 ? [cands[0]] : [];
     let sub = '';
     if (importPath && provider && importPath.length > provider.name.length) {
       sub = importPath.slice(provider.name.length).replace(/^\//, '');
@@ -832,7 +836,14 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
       ? (sub ? `${provider.subdir}/${sub}` : provider.subdir)
       : sub;
     let pool2 = cands.filter(c => dirOfPath(c.path) === wanted);
-    if (pool2.length <= 1) return pool2.length === 1 ? pool2[0] : null;
+    // The subdir key is a path fragment sliced off the import string, which only lines up with a
+    // file's directory for path-style module systems (Go, npm). A Java/JVM or C# import is a DOTTED
+    // package (`com.acme.util.Thing`), so the computed `wanted` (".util") matches no slash-path
+    // directory and the filter removes every candidate, which then reads as "refuse". When the
+    // filter keeps nothing, the narrowing did not apply; fall back to the full candidate set so the
+    // owner/type/overload disambiguation below still runs, rather than dropping the binding.
+    if (pool2.length === 0) pool2 = cands;
+    if (pool2.length <= 1) return pool2.length === 1 ? [pool2[0]] : [];
     // `pkg.Symbol` can only name a PACKAGE-LEVEL declaration. A method of the same name on some
     // type in that package is spelled `value.Symbol` and is unreachable through the package
     // qualifier — so an owned declaration is not a candidate at all. afero declares both
@@ -840,12 +851,25 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
     // only the first is what `afero.Exists` means.
     const free = pool2.filter(c => !c.owner);
     if (free.length) pool2 = free;
-    if (pool2.length === 1) return pool2[0];
+    if (pool2.length === 1) return [pool2[0]];
     // A type reference and a constructor can share a name; the type is what a qualified
     // reference denotes.
     const types = pool2.filter(c => c.node_type === 'CLASS' || c.node_type === 'INTERFACE' || c.node_type === 'ENTITY' || c.node_type === 'TYPE');
-    if (types.length === 1) return types[0];
-    return null;
+    if (types.length === 1) return [types[0]];
+    // Method overloads are ONE logical member, not a name collision: a shared-library method with
+    // several overloads in one file (`Result.of`, say) resolved to nothing here, because the
+    // surviving candidates were several same-named methods and no single one could be picked. When
+    // every survivor is a METHOD declared on the SAME owning type in the SAME file, the qualified
+    // call is unambiguous about which member it means (only not which arity), so bind all of them
+    // rather than refusing: this degrades to a complete set of edges the way in-repo overload
+    // resolution does, instead of dropping the relationship silently. A set spanning different
+    // owners or files is a genuine collision and still refuses.
+    const owners = new Set(pool2.map(c => c.owner || ''));
+    const paths = new Set(pool2.map(c => c.path || ''));
+    if (pool2.every(c => c.node_type === 'METHOD') && owners.size === 1 && !owners.has('') && paths.size === 1) {
+      return pool2;
+    }
+    return [];
   };
 
   const { rows: anchorRows } = await _pool.query(
@@ -964,9 +988,9 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
       }
 
       if (imp.name) {
-        const hit = pickDecl(provider.branchId, imp.name, String(imp.module), provider);
-        if (hit) symbolEdges.set(`${row.file_node_id}|${hit.id}`, [row.file_node_id, hit.id, imp.name]);
-        else if (((declIndex.get(provider.branchId) || new Map()).get(imp.name) || []).length) ambiguousSymbols++;
+        const hits = pickDecl(provider.branchId, imp.name, String(imp.module), provider);
+        for (const hit of hits) symbolEdges.set(`${row.file_node_id}|${hit.id}`, [row.file_node_id, hit.id, imp.name]);
+        if (!hits.length && ((declIndex.get(provider.branchId) || new Map()).get(imp.name) || []).length) ambiguousSymbols++;
       }
     }
   }
@@ -983,7 +1007,8 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
   // package is able to reference.
   if (aliasByFile.size) {
     const { rows: useRows } = await _pool.query(
-      `SELECT n.file_id, json_extract(n.properties, '$.callExpressions') AS calls, n.repository_branch_id AS branch_id,
+      `SELECT n.file_id, n.id AS node_id, n.node_type,
+              json_extract(n.properties, '$.callExpressions') AS calls, n.repository_branch_id AS branch_id,
               concat_ws(' ', json_extract(n.properties, '$.params'), json_extract(n.properties, '$.type'),
                              json_extract(n.properties, '$.signature'), json_extract(n.properties, '$.return_type'),
                              json_extract(n.properties, '$.field_type')) AS type_text
@@ -1013,6 +1038,12 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
       const fileNodeId = fileNodeByFileId.get(u.file_id);
       const aliases = fileNodeId != null ? aliasByFile.get(fileNodeId) : null;
       if (!aliases) continue;
+      // A call site lives in a specific declaration, so attribute its cross-repo edge to that
+      // METHOD node rather than the file: it is what lets a forward query from the caller
+      // (`neighbours(method, "out")`) reach the shared-library method it calls, and it names the
+      // real caller on the reverse side instead of only the file. Type-text and file-level
+      // qualified refs below stay file-grained; they are stamped on the FILE node, not a member.
+      const callSiteNodeId = (u.node_type === 'METHOD' && u.node_id != null) ? u.node_id : fileNodeId;
       for (const call of (Array.isArray(u.calls) ? u.calls : [])) {
         if (!call || !call.receiver || !call.callee) continue;
         const bound = aliases.get(call.receiver);
@@ -1026,9 +1057,9 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
         // one, since every declaration is indexed by its bare name. Preferring `method` when
         // present fixes the Java shape without touching the languages that never set it.
         const symbolName = call.method || call.callee;
-        const hit = pickDecl(bound.provider.branchId, symbolName, bound.importPath, bound.provider);
-        if (hit) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, symbolName]);
-        else if (((declIndex.get(bound.provider.branchId) || new Map()).get(symbolName) || []).length) ambiguousSymbols++;
+        const hits = pickDecl(bound.provider.branchId, symbolName, bound.importPath, bound.provider);
+        for (const hit of hits) symbolEdges.set(`${callSiteNodeId}|${hit.id}`, [callSiteNodeId, hit.id, symbolName]);
+        if (!hits.length && ((declIndex.get(bound.provider.branchId) || new Map()).get(symbolName) || []).length) ambiguousSymbols++;
       }
 
       // Qualified references the extractor recorded for the whole file (ingest.js stamps
@@ -1038,8 +1069,8 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
         if (!q || !q.pkg || !q.name) continue;
         const bound = aliases.get(q.pkg);
         if (!bound) continue;
-        const hit = pickDecl(bound.provider.branchId, q.name, bound.importPath, bound.provider);
-        if (hit) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, q.name]);
+        const hits = pickDecl(bound.provider.branchId, q.name, bound.importPath, bound.provider);
+        for (const hit of hits) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, q.name]);
       }
 
       // Qualified TYPE references in parameter / field / return text.
@@ -1049,8 +1080,8 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
         for (const q of qualified) {
           const bound = aliases.get(q[1]);
           if (!bound) continue;
-          const hit = pickDecl(bound.provider.branchId, q[2], bound.importPath, bound.provider);
-          if (hit) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, q[2]]);
+          const hits = pickDecl(bound.provider.branchId, q[2], bound.importPath, bound.provider);
+          for (const hit of hits) symbolEdges.set(`${fileNodeId}|${hit.id}`, [fileNodeId, hit.id, q[2]]);
         }
       }
     }
