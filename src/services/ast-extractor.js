@@ -7,6 +7,13 @@ let _lastGoQualifiedRefs = [];
 
 const path = require('path');
 const { augmentHttpCallsAcrossLanguages, parameteriseConcatenatedTarget } = require('./http-call-scan');
+// Identifier shapes shared by the tree-sitter planes. Every grammar here admits Unicode
+// letters in identifiers (`Größe`, `変数`, `café`), so the checks are written against the Unicode
+// letter/number classes rather than ASCII ranges, which would drop such a callee as if it were a
+// conversion or a generic instantiation. Go exports on an uppercase first letter of any script.
+const IDENT_RE = /^[\p{L}_$][\p{L}\p{N}_$]*$/u;
+const DOTTED_IDENT_RE = /^[\p{L}_][\p{L}\p{N}_.]*$/u;
+const GO_EXPORTED_RE = /^\p{Lu}[\p{L}\p{N}_]*$/u;
 
 /**
  * AST-like structural extractor — uses regex patterns to extract classes,
@@ -2748,13 +2755,46 @@ function maskKotlinHeaderSyntax(content) {
   return hit ? lines.join('\n') : null;
 }
 
-function innermostEntry(node, entries) {
-  let best = null;
-  for (const e of entries) {
-    if (node.startIndex < e.startIndex || node.endIndex > e.endIndex) continue;
-    if (!best || (e.endIndex - e.startIndex) < (best.endIndex - best.startIndex)) best = e;
+// Groups `nodes` by the innermost `entries` span containing each one, in a single pass.
+// The per-entry form ("for every entry, scan every node, and for each node scan every entry")
+// is cubic in a file's declaration count, and every comparison reads `startIndex`/`endIndex`
+// off a tree-sitter node, which is a wasm round-trip. Here each node's span is read once,
+// entries are sorted by position, and a stack of open spans yields the innermost owner.
+// Declaration spans come from one syntax tree, so they nest or are disjoint; an entry whose
+// span is identical to an already-open one is skipped, so the entry listed first wins the tie.
+// Entries without a span own nothing.
+function groupByInnermost(nodes, entries) {
+  const byEntry = new Map();
+  const spans = [];
+  for (let i = 0; i < entries.length; i += 1) {
+    const e = entries[i];
+    if (typeof e.startIndex !== 'number' || typeof e.endIndex !== 'number') continue;
+    spans.push({ e, i, s: e.startIndex, t: e.endIndex });
   }
-  return best;
+  spans.sort((a, b) => a.s - b.s || b.t - a.t || a.i - b.i);
+  const positioned = nodes.map((n) => ({ n, s: n.startIndex, t: n.endIndex }));
+  positioned.sort((a, b) => a.s - b.s || b.t - a.t);
+  const open = [];
+  let next = 0;
+  for (const p of positioned) {
+    while (next < spans.length && spans[next].s <= p.s) {
+      const cand = spans[next];
+      next += 1;
+      while (open.length && open[open.length - 1].t < cand.s) open.pop();
+      const top = open[open.length - 1];
+      if (top && top.s === cand.s && top.t === cand.t) continue;
+      open.push(cand);
+    }
+    while (open.length && open[open.length - 1].t < p.s) open.pop();
+    let k = open.length - 1;
+    while (k >= 0 && open[k].t < p.t) k -= 1;
+    if (k < 0) continue;
+    const owner = open[k].e;
+    let list = byEntry.get(owner);
+    if (!list) { list = []; byEntry.set(owner, list); }
+    list.push(p.n);
+  }
+  return byEntry;
 }
 
 function extractKotlinTreeSitter(content, filePath) {
@@ -3038,6 +3078,7 @@ function extractKotlinTreeSitter(content, filePath) {
   }
   const kotlinTopLevelFns = kotlinMethodNamesByOwner.get(null) || new Set();
   const kotlinCallNodes = root.descendantsOfType('call_expression');
+  const kotlinCallsByOwner = groupByInnermost(kotlinCallNodes, methodEntries);
   // Known gap, deliberately not addressed here: a call in a property initialiser
   // (`val repo = Repo()`) sits outside every method span and is not collected at all.
   // Attributing it would mean a CLASS-sourced edge, a different edge shape than this
@@ -3048,8 +3089,7 @@ function extractKotlinTreeSitter(content, filePath) {
     const visibleMethods = kotlinMethodNamesByOwner.get(ownerIdx) || new Set();
     const callExprs = [];
     const seenInstantiations = new Set();
-    for (const callNode of kotlinCallNodes) {
-      if (innermostEntry(callNode, methodEntries) !== me) continue;
+    for (const callNode of kotlinCallsByOwner.get(me) || []) {
       const callee = kotlinCallee(callNode);
       if (!callee) continue;
       // Kotlin has no `new`, so a bare callee naming a same-file CLASS that no method
@@ -3493,7 +3533,7 @@ function extractGoTreeSitter(content, filePath) {
       if (!operand || !field || operand.type !== 'identifier' && operand.type !== 'package_identifier') continue;
       const pkg = operand.text;
       const name = field.text;
-      if (!/^[A-Za-z_]\w*$/.test(pkg) || !/^[A-Z]\w*$/.test(name)) continue;
+      if (!IDENT_RE.test(pkg) || !GO_EXPORTED_RE.test(name)) continue;
       const key = `${pkg}.${name}`;
       if (seenRef.has(key)) continue;
       seenRef.add(key);
@@ -3503,13 +3543,13 @@ function extractGoTreeSitter(content, filePath) {
 
   const goCallNodes = root.descendantsOfType('call_expression');
   const goEntries = methodEntries.concat(receiverEntries);
+  const goCallsByOwner = groupByInnermost(goCallNodes, goEntries);
   for (const entry of goEntries) {
     if (entry.startIndex === undefined) continue;
     const nd = nodes[entry.nodeIndex];
     const callExprs = [];
     const seen = new Set();
-    for (const callNode of goCallNodes) {
-      if (innermostEntry(callNode, goEntries) !== entry) continue;
+    for (const callNode of goCallsByOwner.get(entry) || []) {
       const fnNode = callNode.childForFieldName('function');
       if (!fnNode) continue;
       let callee = null;
@@ -3524,7 +3564,7 @@ function extractGoTreeSitter(content, filePath) {
       }
       // A conversion (`[]byte(s)`) and a generic instantiation (`New[T](x)`) are call
       // expressions in the grammar but call no function.
-      if (!callee || !/^[A-Za-z_]\w*$/.test(callee)) continue;
+      if (!callee || !IDENT_RE.test(callee)) continue;
       const line = callNode.startPosition.row + 1;
       const key = `${receiver || ''}:${callee}:${line}`;
       if (seen.has(key)) continue;
@@ -3901,12 +3941,12 @@ function extractPhpTreeSitter(content, filePath) {
                     'object_creation_expression']) {
     for (const n of root.descendantsOfType(ty)) callNodes.push(n);
   }
+  const callsByOwner = groupByInnermost(callNodes, methodEntries);
   for (const me of methodEntries) {
     const nd = nodes[me.nodeIndex];
     const callExprs = [];
     const seen = new Set();
-    for (const callNode of callNodes) {
-      if (innermostEntry(callNode, methodEntries) !== me) continue;
+    for (const callNode of callsByOwner.get(me) || []) {
       let callee = null;
       let receiver = null;
       if (callNode.type === 'function_call_expression') {
@@ -4576,6 +4616,21 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
         if (imp.kind === 'named' || imp.kind === 'type') {
           preciseRelativeTargets.add(path.normalize(path.join(path.dirname(filePath), imp.source)));
         }
+      } else if (imp.kind === 'namespace' && imp.names && imp.names[0]) {
+        // `import * as ns from './mod'` binds the whole module to one local name, the same
+        // shape as Python's `import a.b as ns`, and is recorded the same way: the module string
+        // as the name, the namespace as the alias. A member call `ns.f()` then resolves through
+        // the receiver-import rung, which matches the receiver token against `alias`.
+        addImportFact({ name: imp.source, module: imp.source, alias: imp.names[0], line: imp.line });
+      } else if (imp.kind === 'default' && imp.names && imp.names[0]) {
+        // `import f from './mod'` binds the module's default export under a local name. The
+        // export's own declared name is not visible here, so the local name is recorded as the
+        // symbol; when the two agree (the common `export default function f` case) the bare call
+        // binds through import evidence, and when they differ the lookup misses and falls through.
+        // The module-only fact is kept beside it: it is the file-level dependency, and the rung
+        // that reads a module-only fact as "this file may bind any name declared there".
+        addImportFact({ name: imp.names[0], module: imp.source, alias: null, line: imp.line });
+        addImportFact({ name: imp.source, module: imp.source, alias: null, line: imp.line });
       } else {
         // A side-effect import — `import "../ajax.js"` — binds no identifier, so the per-binding
         // loop above emitted nothing and the file lost that dependency entirely. It is still a
@@ -4650,7 +4705,7 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
       if (!nn) return null;
       const nm = (nn.type === 'nested_type_identifier' || nn.type === 'member_expression'
         ? nn.text.split('.').pop() : nn.text || '').trim();
-      return nm && /^[A-Za-z_$][\w$]*$/.test(nm) ? nm : null;
+      return nm && IDENT_RE.test(nm) ? nm : null;
     };
     for (const clause of clauses) {
       if (clause.type === 'extends_clause' || clause.type === 'implements_clause'
@@ -4749,7 +4804,7 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
     if (t.endsWith('[]')) return null;
     t = t.replace(/<[\s\S]*$/, '').trim();
     t = t.split('.').pop().trim();
-    if (!/^[A-Za-z_$][\w$]*$/.test(t)) return null;
+    if (!IDENT_RE.test(t)) return null;
     if (TYPEFLOW_BUILTIN.has(t)) return null;
     return t;
   };
@@ -4860,6 +4915,8 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
     return at;
   };
 
+  const callsByOwner = groupByInnermost(callNodes, methodEntries);
+  const newsByOwner = groupByInnermost(newNodes, methodEntries);
   for (const me of methodEntries) {
     const nd = nodes[me.nodeIndex];
     const bodyStartIdx = nd.line; // 0-indexed: body starts at index `line` (= 1-indexed line `line+1`), matching the regex path's convention
@@ -4873,8 +4930,7 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
     const callExprs = [];
     const seenCalls = new Set();
     const typeAt = buildScopeTypes(me);
-    for (const callNode of callNodes) {
-      if (innermostEntry(callNode, methodEntries) !== me) continue;
+    for (const callNode of callsByOwner.get(me) || []) {
       const functionNode = callNode.childForFieldName('function');
       if (!functionNode) continue;
       const isMember = functionNode.type === 'member_expression';
@@ -4904,10 +4960,9 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
         ...(flowed && flowed !== rawReceiver ? { receiver_expr: rawReceiver, type_flow: true } : {}),
         ...(httpHint || {}) });
     }
-    for (const newNode of newNodes) {
-      if (innermostEntry(newNode, methodEntries) !== me) continue;
+    for (const newNode of newsByOwner.get(me) || []) {
       const callee = ctorName(newNode.childForFieldName('constructor'));
-      if (!callee || !/^[A-Za-z_$][\w$]*$/.test(callee)) continue;
+      if (!callee || !IDENT_RE.test(callee)) continue;
       const line = newNode.startPosition.row + 1;
       const key = `${callee}:${line}`;
       if (seenCalls.has(key)) continue;
@@ -5267,13 +5322,14 @@ function extractCSharpTreeSitter(content, filePath) {
   // type's bare name as the callee (generics and namespace qualifier stripped, so `new List<T>()`
   // -> List and `new A.B()` -> B).
   const newNodes = root.descendantsOfType('object_creation_expression');
+  const callsByOwner = groupByInnermost(callNodes, memberEntries);
+  const newsByOwner = groupByInnermost(newNodes, memberEntries);
   for (const me of memberEntries) {
     const nd = nodes[me.nodeIndex];
     if (nd.node_type !== 'METHOD') continue;
     const callExprs = [];
     const seen = new Set();
-    for (const callNode of callNodes) {
-      if (innermostEntry(callNode, memberEntries) !== me) continue;
+    for (const callNode of callsByOwner.get(me) || []) {
       const fn = callNode.childForFieldName('function');
       if (!fn) continue;
       const calleeNode = fn.type === 'member_access_expression' ? fn.childForFieldName('name') : fn;
@@ -5288,8 +5344,7 @@ function extractCSharpTreeSitter(content, filePath) {
         ? (fn.childForFieldName('expression') || {}).text : null;
       callExprs.push(receiver ? { callee, line, receiver } : { callee, line });
     }
-    for (const newNode of newNodes) {
-      if (innermostEntry(newNode, memberEntries) !== me) continue;
+    for (const newNode of newsByOwner.get(me) || []) {
       const typeNode = newNode.childForFieldName('type');
       const callee = typeNode ? csBareTypeName(typeNode.text) : null;
       if (!callee) continue;
@@ -5451,7 +5506,7 @@ function extractPythonTreeSitter(content, filePath) {
         // root. The regex allows dots for exactly this.
         const raw = arg.type === 'keyword_argument' ? null : arg.text;
         const toName = (raw || '').trim();
-        if (toName && /^[A-Za-z_][\w.]*$/.test(toName) && toName !== 'object') {
+        if (toName && DOTTED_IDENT_RE.test(toName) && toName !== 'object') {
           inheritanceEdges.push({
             fromIndex: nodes.length - 1, toName, edgeType: 'EXTENDS', evidenceLine: nd.line,
           });
@@ -5586,13 +5641,8 @@ function extractPythonTreeSitter(content, filePath) {
   const contentLines = content.split('\n');
   const callNodes = root.descendantsOfType('call');
   const callOwnerIndex = new Map();
-  for (const callNode of callNodes) {
-    let best = null;
-    for (const me of methodEntries) {
-      if (callNode.startIndex < me.startIndex || callNode.endIndex > me.endIndex) continue;
-      if (!best || (me.endIndex - me.startIndex) < (best.endIndex - best.startIndex)) best = me;
-    }
-    callOwnerIndex.set(callNode, best ? best.nodeIndex : -1);
+  for (const [me, owned] of groupByInnermost(callNodes, methodEntries)) {
+    for (const callNode of owned) callOwnerIndex.set(callNode, me.nodeIndex);
   }
   for (const me of methodEntries) {
     const nd = nodes[me.nodeIndex];
@@ -6203,13 +6253,13 @@ function extractCTreeSitter(content, filePath, parser, keepTree = false) {
   }
 
   const callNodes = root.descendantsOfType('call_expression');
+  const callsByOwner = groupByInnermost(callNodes, memberEntries);
   for (const me of memberEntries) {
     const nd = nodes[me.nodeIndex];
     if (nd.node_type !== 'METHOD') continue;
     const callExprs = [];
     const seen = new Set();
-    for (const callNode of callNodes) {
-      if (innermostEntry(callNode, memberEntries) !== me) continue;
+    for (const callNode of callsByOwner.get(me) || []) {
       const fn = callNode.childForFieldName('function');
       if (!fn) continue;
       let callee = null;
