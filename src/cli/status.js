@@ -96,7 +96,7 @@ function hookState() {
     path.join(process.cwd(), '.claude', 'settings.local.json'),
     path.join(os.homedir(), '.claude', 'settings.json'),
   ];
-  const wanted = ['record.mjs', 'preflight.mjs', 'nudge.mjs', 'session-end.mjs', 'context.mjs'];
+  const wanted = ['record.mjs', 'preflight.mjs', 'nudge.mjs', 'session-end.mjs', 'context.mjs', 'inject.mjs'];
   const found = new Set();
   let anySettings = false;
   for (const f of files) {
