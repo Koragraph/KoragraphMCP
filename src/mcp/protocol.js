@@ -1,6 +1,6 @@
 'use strict';
 
-const { SERVER_INFO, SERVER_INSTRUCTIONS, listTools, getTool } = require('./tool-contracts');
+const { SERVER_INFO, serverInstructions, listTools, getTool } = require('./tool-contracts');
 const { validateArgs } = require('./validate');
 const { HANDLERS } = require('./tool-handlers');
 
@@ -206,7 +206,7 @@ async function handleMessage(message, deps = {}) {
         protocolVersion: negotiateProtocol(params?.protocolVersion),
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: SERVER_INSTRUCTIONS,
+        instructions: serverInstructions(),
       });
     }
     case 'notifications/initialized':
