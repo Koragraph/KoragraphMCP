@@ -17,6 +17,11 @@ const path = require('node:path');
 // answer points at, so an installed repo and the doctor's snippet cannot disagree.
 const HOOK_WIRING = Object.freeze([
   ['UserPromptSubmit', 'context.mjs', null],
+  // Prompt-conditioned graph push: reads the prompt for a symbol and a phrase and injects a small,
+  // budgeted explore/recall block, so the graph reaches the model whether or not it thinks to ask.
+  // Distinct from context.mjs (which pushes session laws): this one is prompt-conditioned and stays
+  // additive. It shells the CLI with a hard timeout and fails open; KORAGRAPH_INJECT=0 disables it.
+  ['UserPromptSubmit', 'inject.mjs', null],
   ['PreToolUse', 'preflight.mjs', 'Bash|Edit|Write|MultiEdit|NotebookEdit'],
   // No matcher: this one has to see every tool name, including mcp__koragraph__* attempts (to mark
   // the graph as "in use" and go quiet) and raw Bash/Grep/Read/Glob calls. A cold Grep/Glob (the

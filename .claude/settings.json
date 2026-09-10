@@ -52,6 +52,11 @@
             "type": "command",
             "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/context.mjs\"; fi",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "if [ -x \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject.mjs\" ]; then exec \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject.mjs\"; elif [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject.mjs\" ]; then exec node \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject.mjs\"; fi",
+            "timeout": 10
           }
         ]
       }

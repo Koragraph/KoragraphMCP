@@ -205,6 +205,7 @@ function storeDetail(dbFile, branches) {
 // absolute path already filled in.
 const HOOK_WIRING = Object.freeze([
   ['UserPromptSubmit', 'context.mjs', null],
+  ['UserPromptSubmit', 'inject.mjs', null],
   ['PreToolUse', 'preflight.mjs', 'Bash|Edit|Write|MultiEdit|NotebookEdit'],
   ['PreToolUse', 'nudge.mjs', null],
   ['PostToolUse', 'record.mjs', null],
