@@ -27,6 +27,10 @@ claude mcp add koragraph -s user -- koragraph mcp
 
 `koragraph doctor` checks the whole chain and prints the exact line for any editor.
 
+Two ways to use it from here: your agent calls the tools over MCP, or you (or a script, or a Claude
+Code hook) run them straight from the shell, for example `koragraph explore "how does checkout work"`
+or `koragraph blast src/pay.js`. Same graph either way.
+
 ### Then run KORAINIT in your editor
 
 This is the step that lights up the memory layer, so don't skip it. In your coding agent (Claude
@@ -64,6 +68,8 @@ Report: nodes/edges indexed, whether the MCP connected, and KORAINIT's summary.
 <img src="assets/logos/opencode.svg" height="34" alt="OpenCode">&nbsp;&nbsp;&nbsp;
 <img src="assets/logos/openai.svg" height="34" alt="Codex">&nbsp;&nbsp;&nbsp;
 <img src="assets/logos/antigravity.png" height="34" alt="Antigravity">
+
+<br><sub><strong>Adoption is highest on Claude Code:</strong> its hooks let koragraph put the graph in front of the agent on every turn, so it actually gets used instead of falling back to grep. Other editors reach koragraph over MCP, where the agent decides when to call it.</sub>
 </div>
 
 ---
@@ -128,21 +134,26 @@ pinned oracles. Full breakdown in [`test/benchmark/REPORT.md`](test/benchmark/RE
 
 ## The tools
 
-Nine MCP tools. Every one returns `file:line`, never pasted source. Exactly one writes.
+Nine tools, reachable two ways: as **MCP tools** in your editor, and as **CLI commands** in your
+shell. On Claude Code a hook also calls the CLI to push the relevant slice into context on every
+turn, so the graph gets used whether or not the agent thinks to ask. Every tool returns `file:line`,
+never pasted source. Exactly one writes.
 
-| Tool | What it's for |
-|---|---|
-| **`blast_radius`** | Run before editing. Everything that depends on this, across repos, and what has no test coverage. |
-| **`explore`** | A symbol or plain English gives you ranked declarations, source, callers, callees. |
-| `search_code` | Find a name in the graph, not raw text. |
-| `neighbours` | Callers and callees of one symbol. |
-| `changes_with` | What has historically shipped together with a symbol. |
-| `file_symbols` | Declarations in one file. |
-| `overview` | Orient on turn one, across every repo. |
-| `recall` | A past failure and its fix, a hazard, an open loop. |
-| `remember` | Save a durable, code-anchored fact. The only writer. |
+| Tool | Shell | What it's for |
+|---|---|---|
+| **`blast_radius`** | `koragraph blast <files…>` | Run before editing. Everything that depends on this, across repos, and what has no test coverage. |
+| **`explore`** | `koragraph explore "<symbol or phrase>"` | Ranked declarations, source, callers, callees, in one call. |
+| `search_code` | `koragraph search <name>` | Find a name in the graph, not raw text. |
+| `neighbours` | `koragraph neighbours <symbol>` | Callers and callees of one symbol. |
+| `changes_with` | `koragraph cochange <symbol>` | What has historically shipped together with a symbol. |
+| `file_symbols` | `koragraph symbols <file>` | Declarations in one file. |
+| `overview` | `koragraph overview` | Orient on turn one, across every repo. |
+| `recall` | `koragraph recall <symbol>` | A past failure and its fix, a hazard, an open loop. |
+| `remember` | `koragraph remember "<fact>"` | Save a durable, code-anchored fact. The only writer. |
 
-Plus a CLI: `ingest`, `serve`, `status`, `doctor`, `diff`, `trace`, `hooks`, `practice`, `report`.
+Every query verb takes `--format compact|json|paths` and `--budget <tokens>`, so a result can be
+trimmed before it ever enters an agent's context. Plus the operational CLI: `ingest`, `serve`,
+`status`, `doctor`, `diff`, `trace`, `hooks`, `practice`, `report`.
 
 ---
 
