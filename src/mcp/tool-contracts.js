@@ -510,11 +510,40 @@ const TOOLS = Object.freeze([
 
 const TOOL_NAMES = Object.freeze(TOOLS.map((t) => t.name));
 
+// Lite mode (KORAGRAPH_MCP_LITE=1): a CLI-first install keeps the graph reachable in an editor
+// through a minimal MCP surface instead of the full nine tools. Every tool definition and the
+// instruction block are re-billed on every turn as cached context, so a smaller advertised surface
+// is a smaller always-on cost. Lite advertises only the three verbs an agent reaches for unprompted,
+// each with a one-line description, and a two-line instruction block; the other verbs stay reachable
+// through the CLI (`koragraph <verb>`) and through getTool, so a direct call to one still validates.
+const LITE_TOOL_NAMES = Object.freeze(['explore', 'recall', 'remember']);
+const LITE_DESCRIPTIONS = Object.freeze({
+  explore: 'Take a symbol or a plain-English phrase and get the ranked declarations plus the source, callers and callees of the top hits, in one call. Reach for it before grep to find where something is or how it works. Returns file:line; read the file yourself.',
+  recall: 'Recall what was learned the hard way about this code: a past failure and its fix, a hazard, a stated rule, an open loop. Call it first when a symbol is unfamiliar or an error looks familiar; silence just means nothing was recorded.',
+  remember: 'Save a durable, code-anchored fact about this repository to koramemory: a rule the developer stated, a hazard that cost time, an approach that failed. Anchor it to the declaration it is about via `symbol` so it follows a rename and expires with the code.',
+});
+const LITE_INSTRUCTIONS = [
+  'Koragraph serves this repository as a resolved code graph plus a durable memory of what was',
+  'learned here. Call recall first when a symbol is unfamiliar or an error looks familiar; use',
+  'explore before grep to find code; use remember to save a code-anchored fact. Every result is',
+  'file:line — read the file yourself.',
+].join(' ');
+
+function isLiteMode() {
+  return process.env.KORAGRAPH_MCP_LITE === '1' || process.env.KORAGRAPH_MCP_LITE === 'true';
+}
+
+function serverInstructions() {
+  return isLiteMode() ? LITE_INSTRUCTIONS : SERVER_INSTRUCTIONS;
+}
+
 function listTools() {
-  return TOOLS.map((t) => ({
+  const lite = isLiteMode();
+  const tools = lite ? TOOLS.filter((t) => LITE_TOOL_NAMES.includes(t.name)) : TOOLS;
+  return tools.map((t) => ({
     name: t.name,
     title: t.title,
-    description: t.description,
+    description: lite && LITE_DESCRIPTIONS[t.name] ? LITE_DESCRIPTIONS[t.name] : t.description,
     inputSchema: t.inputSchema,
     annotations: t.annotations,
   }));
@@ -524,4 +553,7 @@ function getTool(name) {
   return TOOLS.find((t) => t.name === name) || null;
 }
 
-module.exports = { SERVER_INFO, SERVER_INSTRUCTIONS, TOOLS, TOOL_NAMES, listTools, getTool };
+module.exports = {
+  SERVER_INFO, SERVER_INSTRUCTIONS, TOOLS, TOOL_NAMES, listTools, getTool,
+  isLiteMode, serverInstructions,
+};
