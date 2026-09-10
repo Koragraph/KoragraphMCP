@@ -18,6 +18,18 @@ const COMMANDS = {
   hooks: { summary: 'Install git hooks that re-index a repository automatically on commit/checkout', load: () => require('./hooks') },
   practice: { summary: 'Inspect, correct and maintain what has been learned about this code', load: () => require('./practice') },
   mcp: { summary: 'Serve the graph to your editor over MCP on stdio', load: () => require('./mcp') },
+
+  // The graph-query verbs, the same handlers the MCP surface serves, reachable from a shell and a
+  // hook. Built from one adapter (query.js) so their output policy (--format/--budget/--no-source)
+  // and exit codes stay identical across the set.
+  explore: { summary: 'Rank declarations for a symbol or phrase, with source, callers and callees', load: () => require('./query').makeCommand('explore') },
+  search: { summary: 'Locate declarations by name', load: () => require('./query').makeCommand('search') },
+  neighbours: { summary: 'Show the exact callers and callees of one symbol', load: () => require('./query').makeCommand('neighbours') },
+  blast: { summary: 'Show what depends on the files you are about to change', load: () => require('./query').makeCommand('blast') },
+  symbols: { summary: 'List the declarations in one file', load: () => require('./query').makeCommand('symbols') },
+  overview: { summary: 'Orient on the repositories in the graph', load: () => require('./query').makeCommand('overview') },
+  recall: { summary: 'Recall what was learned about a symbol or file before touching it', load: () => require('./query').makeCommand('recall') },
+  remember: { summary: 'Record a durable lesson, hazard or rule about this code', load: () => require('./query').makeCommand('remember') },
 };
 
 const HELP = `koragraph — a local, multi-repo code graph for your coding agent
