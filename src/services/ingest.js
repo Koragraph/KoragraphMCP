@@ -2393,7 +2393,21 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
       // nothing is annotated, so the same silence means nothing — measured on jquery, applying
       // it there cost 22.5 points of call recall for 1.9 points of precision.
       const hasDeclaredTypes = TYPED_CALL_EXTS.has(extOf(callerPath));
+      // The extractors stamp a member call's callee as the DOTTED text ("svc.doWork") and carry the
+      // bare member name separately as `method`. The receiver-keyed rungs look their target up by the
+      // bare declaration name, so they must be handed `method`. Fall back to the final dotted segment
+      // when an extractor set no `method`.
+      const bareCallee = expr.method
+        || (rawCallee.includes('.') ? rawCallee.slice(rawCallee.lastIndexOf('.') + 1) : rawCallee);
+      // A member call whose receiver is an imported module namespace binds by resolving the member as
+      // an export of that module: `const inv = require('./inv'); inv.reserveStock()` and
+      // `import * as inv from './inv'; inv.reserveStock()` both resolve to inv's reserveStock. Ranked
+      // with import evidence and ahead of module-stem, because the receiver is proof of the module;
+      // resolveViaReceiverImport returns a target only when the member is a unique declaration there,
+      // so it cannot lower precision. Without this rung a require-namespace member call fell through
+      // to the branch-wide name match below, which is why plain CommonJS callers under-reported.
       const importHit = resolveViaImportEvidence(caller.id, rawCallee, fileIndex)
+        || (expr.receiver ? resolveViaReceiverImport(caller.id, expr.receiver, bareCallee, fileIndex) : null)
         || resolveViaModuleStem(caller.id, rawCallee, fileIndex, fileIndex.symbolIndex);
       // A member call through a receiver whose declared type is known is proof, not a guess:
       // `_svc.DoWork()` where `_svc` is a field/parameter typed `FooService` binds to
@@ -2401,14 +2415,6 @@ async function resolveCallExpressionEdges(branchId, scopeFileIds = null) {
       // name match, so a typed receiver resolves precisely instead of falling through to a
       // locality-narrowed name guess. resolveViaReceiverType returns a target only when the
       // field's type and the member are both unique, so it cannot lower precision.
-      // The extractors stamp a member call's callee as the DOTTED text ("svc.doWork") and carry the
-      // bare member name separately as `method`. resolveViaReceiverType looks its target up by the
-      // bare declaration name, so it must be handed `method`. Passing the dotted callee made every
-      // lookup miss, so the typed-receiver tier never fired and member calls fell through to the
-      // name-keyed branch below, which cannot tell two same-named methods on different receiver
-      // types apart. Fall back to the final dotted segment when an extractor set no `method`.
-      const bareCallee = expr.method
-        || (rawCallee.includes('.') ? rawCallee.slice(rawCallee.lastIndexOf('.') + 1) : rawCallee);
       const receiverTypeHit = (!importHit && expr.receiver)
         ? resolveViaReceiverType(caller.id, expr.receiver, bareCallee, fileIndex)
         : null;
