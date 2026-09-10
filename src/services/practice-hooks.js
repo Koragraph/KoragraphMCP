@@ -66,7 +66,11 @@ function isKoragraphCommand(cmd) {
 // the wrong one's entry and overwrite it instead of installing its own.
 function isThisKoragraphCommand(cmd, file) {
   if (typeof cmd !== 'string') return false;
-  return cmd.includes(path.join(koragraphRoot(), '.claude', 'hooks', file));
+  // Match both the installer's absolute path and the committed `$CLAUDE_PROJECT_DIR/.claude/hooks/…`
+  // form a checkout carries, so status/uninstall recognise a hook however it was wired. The file
+  // names are koragraph's own, so the relative tail cannot collide with an unrelated hook.
+  return cmd.includes(path.join(koragraphRoot(), '.claude', 'hooks', file))
+    || cmd.includes(path.join('.claude', 'hooks', file));
 }
 
 function settingsPath(repoPath) {
