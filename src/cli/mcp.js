@@ -12,15 +12,15 @@ const USAGE = `Usage: koragraph mcp
 Serve the graph to your editor over MCP on stdio. This is the command you put in an MCP
 config; it speaks JSON-RPC on stdout and nothing else, and every log line goes to stderr.
 
-Claude Code, from a checkout:
-  claude mcp add koragraph -- node /absolute/path/to/bin/koragraph.js mcp
+Claude Code, with a global install (npm i -g koragraphmcp):
+  claude mcp add koragraph -s user -- koragraph mcp
 
 Or, in an mcp.json:
-  { "mcpServers": { "koragraph": { "command": "node",
-      "args": ["/absolute/path/to/bin/koragraph.js", "mcp"] } } }
+  { "mcpServers": { "koragraph": { "command": "koragraph", "args": ["mcp"] } } }
 
-The npx form is not shown because the package is unpublished — run it from a checkout.
-\`koragraph doctor\` prints the line above with this checkout's absolute path already in it.
+From a checkout instead, point at the absolute path:
+  claude mcp add koragraph -- node /absolute/path/to/bin/koragraph.js mcp
+\`koragraph doctor\` prints the right line for your install.
 
 The session ends when the editor closes stdin. Index a repository with \`koragraph ingest\`
 first — with an empty store the tools answer with the command to run, not an error.

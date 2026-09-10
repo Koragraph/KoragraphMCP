@@ -6,18 +6,10 @@ const { version } = require('../../package.json');
 // Loaders, not modules: `koragraph --help` and every parse error must resolve without opening the
 // store or pulling in tree-sitter. Each command module requires only node builtins at load time
 // and takes its services inside run().
+// Ordered for `koragraph --help`: index first, then the graph-query verbs that are the daily
+// surface, then the ways to wire it into an editor and keep it healthy, then the operational rest.
 const COMMANDS = {
   ingest: { summary: 'Index one or more local repositories into the graph', load: () => require('./ingest') },
-  status: { summary: 'Show what is in the graph and when it was last indexed', load: () => require('./status') },
-  report: { summary: 'Write a Markdown snapshot of the graph (GRAPH_REPORT.md)', load: () => require('./report') },
-  serve: { summary: 'Open an interactive picture of the graph in your browser (local, no network)', load: () => require('./serve') },
-  doctor: { summary: 'Check the install end to end and name a remedy for anything wrong', load: () => require('./doctor') },
-  cochange: { summary: 'Show what has historically changed together with a symbol', load: () => require('./cochange') },
-  diff: { summary: 'Show which declarations appeared or disappeared in the last re-index', load: () => require('./diff') },
-  trace: { summary: 'Run tests and fold the calls that actually happened into the graph (Python)', load: () => require('./trace') },
-  hooks: { summary: 'Install git hooks that re-index a repository automatically on commit/checkout', load: () => require('./hooks') },
-  practice: { summary: 'Inspect, correct and maintain what has been learned about this code', load: () => require('./practice') },
-  mcp: { summary: 'Serve the graph to your editor over MCP on stdio', load: () => require('./mcp') },
 
   // The graph-query verbs, the same handlers the MCP surface serves, reachable from a shell and a
   // hook. Built from one adapter (query.js) so their output policy (--format/--budget/--no-source)
@@ -26,10 +18,21 @@ const COMMANDS = {
   search: { summary: 'Locate declarations by name', load: () => require('./query').makeCommand('search') },
   neighbours: { summary: 'Show the exact callers and callees of one symbol', load: () => require('./query').makeCommand('neighbours') },
   blast: { summary: 'Show what depends on the files you are about to change', load: () => require('./query').makeCommand('blast') },
+  cochange: { summary: 'Show what has historically changed together with a symbol', load: () => require('./cochange') },
   symbols: { summary: 'List the declarations in one file', load: () => require('./query').makeCommand('symbols') },
   overview: { summary: 'Orient on the repositories in the graph', load: () => require('./query').makeCommand('overview') },
   recall: { summary: 'Recall what was learned about a symbol or file before touching it', load: () => require('./query').makeCommand('recall') },
   remember: { summary: 'Record a durable lesson, hazard or rule about this code', load: () => require('./query').makeCommand('remember') },
+
+  mcp: { summary: 'Serve the graph to your editor over MCP on stdio', load: () => require('./mcp') },
+  status: { summary: 'Show what is in the graph and when it was last indexed', load: () => require('./status') },
+  doctor: { summary: 'Check the install end to end and name a remedy for anything wrong', load: () => require('./doctor') },
+  hooks: { summary: 'Install git hooks that re-index a repository automatically on commit/checkout', load: () => require('./hooks') },
+  serve: { summary: 'Open an interactive picture of the graph in your browser (local, no network)', load: () => require('./serve') },
+  diff: { summary: 'Show which declarations appeared or disappeared in the last re-index', load: () => require('./diff') },
+  trace: { summary: 'Run tests and fold the calls that actually happened into the graph (Python)', load: () => require('./trace') },
+  report: { summary: 'Write a Markdown snapshot of the graph (GRAPH_REPORT.md)', load: () => require('./report') },
+  practice: { summary: 'Inspect, correct and maintain what has been learned about this code', load: () => require('./practice') },
 };
 
 const HELP = `koragraph — a local, multi-repo code graph for your coding agent
@@ -37,7 +40,7 @@ const HELP = `koragraph — a local, multi-repo code graph for your coding agent
 Usage: koragraph <command> [options]
 
 Commands:
-${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(10)}${c.summary}`).join('\n')}
+${Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(12)}${c.summary}`).join('\n')}
 
   koragraph <command> --help    Options for one command
   koragraph --version           Print the version

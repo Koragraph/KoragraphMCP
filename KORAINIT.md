@@ -28,6 +28,11 @@ yourself — you lose only the segment counts, so say that rather than stopping.
 
 Write the resolved command down and use it verbatim; below it is written as `koragraph`.
 
+The same CLI exposes the graph-query verbs, so once the graph exists you can navigate the code from
+the shell during any task, not only through MCP: `koragraph explore "<symbol or phrase>"`,
+`koragraph neighbours <symbol>`, `koragraph blast <files…>`, `koragraph search <name>`,
+`koragraph recall <symbol>`. Every one takes `--format compact|json|paths` and `--budget <tokens>`.
+
 ## 1. Confirm the graph exists
 
 Run `koragraph status`. If it reports no repository, no nodes, or no graph store, stop and tell the

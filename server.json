@@ -3,7 +3,7 @@
   "name": "in.koragraph/koragraph",
   "title": "Koragraph",
   "description": "Local multi-repo code graph over MCP. Blast radius, call graphs, and memory anchored to code.",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "websiteUrl": "https://www.koragraph.in",
   "repository": {
     "url": "https://github.com/Koragraph/KoragraphMCP",
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "koragraphmcp",
-      "version": "0.1.4",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },
