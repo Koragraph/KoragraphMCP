@@ -1569,7 +1569,11 @@ function buildImportInfo(match, lang, lineNum) {
         const names = [];
         if (match[1]) names.push(match[1]);
         if (match[2]) names.push(...match[2].split(',').map(s => s.trim().split(/\s+as\s+/)[0]).filter(Boolean));
-        return { source, line: lineNum, names, kind: 'require' };
+        // `const ns = require('m')` binds the whole module to one local name (match[1]); record it as
+        // `namespace` so a member call `ns.f()` resolves through the receiver-import rung, the same way
+        // `import * as ns` does. The destructured form (`const { a } = require('m')`, match[2]) leaves
+        // it unset and keeps resolving bare names through the module-scan rung.
+        return { source, line: lineNum, names, kind: 'require', ...(match[1] ? { namespace: match[1] } : {}) };
       }
       // ES module import
       const source = match[4];
@@ -4631,6 +4635,12 @@ function extractTypeScriptTreeSitter(content, filePath, variant = 'typescript') 
         // that reads a module-only fact as "this file may bind any name declared there".
         addImportFact({ name: imp.names[0], module: imp.source, alias: null, line: imp.line });
         addImportFact({ name: imp.source, module: imp.source, alias: null, line: imp.line });
+      } else if (imp.namespace) {
+        // CommonJS namespace require `const ns = require('./mod')`: mirror `import * as ns` above —
+        // the module string as the name (so the module-scan rung still fires for a bare call), the
+        // local binding as the alias, so a member call `ns.f()` resolves through the receiver-import
+        // rung, which matches the receiver token against `alias`.
+        addImportFact({ name: imp.source, module: imp.source, alias: imp.namespace, line: imp.line });
       } else {
         // A side-effect import — `import "../ajax.js"` — binds no identifier, so the per-binding
         // loop above emitted nothing and the file lost that dependency entirely. It is still a
