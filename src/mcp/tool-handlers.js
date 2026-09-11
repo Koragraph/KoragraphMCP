@@ -3,7 +3,7 @@
 const { LOCAL_ORG_ID } = require('../config/local-org');
 const { TASK_TYPES } = require('../services/retrieval-policy');
 const { EDGE_RENDER_WEIGHT } = require('../services/subgraph-builder');
-const { resolveSymbol, resolverError } = require('./symbol-resolver');
+const { resolveSymbol, resolverError, CONTAINER_NODE_TYPES } = require('./symbol-resolver');
 const render = require('./render');
 const { neutralise, redactSecrets } = require('../practice/untrusted');
 
@@ -151,6 +151,17 @@ function compactRelation(r) {
 // subgraph-builder.js. Only `CO_CHANGES` is the measured declaration-grain plane, so only it is
 // gated behind include_cochange and only it is what changes_with serves.
 const COCHANGE_EDGE_TYPE = 'CO_CHANGES';
+
+// "What is inside this declaration" (a class's own methods/fields, always present, always the
+// majority of its incident edges, plus the FILE-containment edge every declaration carries) and
+// "what depends on this declaration" are different questions. DEFINED_IN (member -> owning class)
+// and CONTAINS (file -> the declarations in it) both answer the first; neighbours is asked the
+// second. subgraph-builder.js's EDGE_RENDER_WEIGHT already scores both at 0.5, the same "structural
+// bookkeeping" tier, for the same reason — so, like CO_CHANGES above, they are excluded by default
+// and admitted only on request, rather than left to outnumber and bury the real CALLS/DEPENDS_ON
+// answer under a declaration's own membership bookkeeping.
+const DEFINED_IN_EDGE_TYPE = 'DEFINED_IN';
+const STRUCTURAL_MEMBERSHIP_EDGE_TYPES = Object.freeze([DEFINED_IN_EDGE_TYPE, 'CONTAINS']);
 
 // CO_CHANGES has no EDGE_RENDER_WEIGHT entry, so the shared table's `?? 1.0` fallback would rank a
 // statistical co-occurrence above a resolved CALLS edge. Pinned here to COUPLED_WITH's weight,
@@ -323,6 +334,21 @@ async function incidentSet(svc, nodeId, { direction, edgeTypes, includeHeuristic
   return parts.flat();
 }
 
+// A real external caller of a class almost never calls the class node itself — it calls one of the
+// class's METHODs, which is a DIFFERENT node id. Asking "who depends on this class" by the class's
+// own incident edges alone finds only its members reporting themselves as "callers" via DEFINED_IN
+// and misses every genuine caller, exactly the way blast_radius avoids this by seeding its walk with
+// every node declared in the changed FILE rather than just the one the caller named. This is the
+// same fix at symbol grain: a container's own members (found via the same DEFINED_IN edge, direction
+// "in", since DEFINED_IN always points child -> parent) are folded into the walk so their real
+// callers surface as the container's neighbours instead of vanishing behind the container's node id.
+async function containerMemberIds(svc, containerId) {
+  const memberRels = await incidentSet(svc, containerId, {
+    direction: 'in', edgeTypes: [DEFINED_IN_EDGE_TYPE], includeHeuristic: false,
+  });
+  return memberRels.map((r) => r.node_id);
+}
+
 // A client may render `structuredContent` and NOT the text block — Claude Code does. Asked to quote
 // overview's first line verbatim, a real session answered: "The response has no free-text first
 // line, but as verbatim first field: `\"detail\":\"concise\"`". So the highest-attention position in
@@ -477,17 +503,31 @@ async function neighbours(args, deps = {}) {
     edgeTypes: args.edge_types || null,
     includeHeuristic: args.include_heuristic === true,
   };
+  const includeDefinedIn = args.include_defined_in === true;
 
   let rels = [];
+  const seededNodeIds = new Set(resolution.resolved.map((n) => n.node_id));
   for (const node of resolution.resolved) {
     rels.push(...await incidentSet(svc, node.node_id, opts));
+    if (CONTAINER_NODE_TYPES.has(node.type) && (direction === 'in' || direction === 'both')) {
+      const memberIds = await containerMemberIds(svc, node.node_id);
+      for (const memberId of memberIds.slice(0, HOP_FRONTIER_CAP)) {
+        if (seededNodeIds.has(memberId)) continue;
+        seededNodeIds.add(memberId);
+        rels.push(...await incidentSet(svc, memberId, opts));
+      }
+    }
   }
-  // The service layer filters heuristics but not co-change, so a statistical relation would
-  // otherwise arrive inside a CALLS-shaped answer. An explicit edge_types allow-list naming
-  // CO_CHANGES is treated as consent.
-  const explicitlyAsked = (args.edge_types || []).includes(COCHANGE_EDGE_TYPE);
-  if (!includeCochange && !explicitlyAsked) {
+  // The service layer filters heuristics but not co-change or DEFINED_IN, so a statistical relation
+  // or a class's own membership bookkeeping would otherwise arrive inside a CALLS-shaped answer. An
+  // explicit edge_types allow-list naming either is treated as consent.
+  const explicitlyAskedCochange = (args.edge_types || []).includes(COCHANGE_EDGE_TYPE);
+  if (!includeCochange && !explicitlyAskedCochange) {
     rels = rels.filter((r) => r.edge_type !== COCHANGE_EDGE_TYPE);
+  }
+  const explicitlyAskedDefinedIn = STRUCTURAL_MEMBERSHIP_EDGE_TYPES.some((t) => (args.edge_types || []).includes(t));
+  if (!includeDefinedIn && !explicitlyAskedDefinedIn) {
+    rels = rels.filter((r) => !STRUCTURAL_MEMBERSHIP_EDGE_TYPES.includes(r.edge_type));
   }
 
   if (depth > 1) {
@@ -510,7 +550,8 @@ async function neighbours(args, deps = {}) {
         const next = await incidentSet(svc, r.node_id, opts);
         for (const h of next) hopRels.push({ ...h, depth: hop });
       }
-      const filtered = hopRels.filter((r) => includeCochange || r.edge_type !== COCHANGE_EDGE_TYPE);
+      const filtered = hopRels.filter((r) => (includeCochange || r.edge_type !== COCHANGE_EDGE_TYPE)
+        && (includeDefinedIn || !STRUCTURAL_MEMBERSHIP_EDGE_TYPES.includes(r.edge_type)));
       rels.push(...filtered);
       frontierPool = filtered; // next hop expands from what THIS hop found, not the whole pool again
     }
@@ -710,6 +751,7 @@ async function blastRadius(args, deps = {}) {
   // policyFor('refactor').depth === 3 unreachable through this path.
   if (args.depth != null) request.maxDepth = args.depth;
   if (taskType) request.taskType = taskType;
+  if (args.exclude_non_source === true) request.excludeNonSource = true;
 
   const surface = await svc.computeBlastRadius(request);
 

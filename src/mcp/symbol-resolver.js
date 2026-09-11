@@ -48,6 +48,23 @@ function pathMatches(nodePath, hint) {
   return p === h || p.endsWith(`/${h}`) || p.split('/').pop() === h.split('/').pop();
 }
 
+// A class and its own same-named constructor (or a framework layer's SERVICE node for the same
+// declaration) is not a real ambiguity — every class in a codebase with this shape hits it — so
+// resolving "RecruitmentServiceV2" to the CLASS/SERVICE node(s) AND the constructor METHOD as three
+// separate, equally-ranked results makes a caller do the disambiguation resolveSymbol exists to do.
+// A container declaration outranks its own bare-name constructor by default; a genuine collision
+// across different files or owners (two unrelated classes sharing a name) is untouched, because the
+// filter only drops a METHOD whose file matches one of the containers already in the match set.
+const CONTAINER_NODE_TYPES = Object.freeze(new Set(['CLASS', 'INTERFACE', 'ENTITY', 'SERVICE', 'ENUM', 'TYPE']));
+
+function preferContainerOverConstructor(nodes) {
+  if (nodes.length <= 1) return nodes;
+  const containers = nodes.filter((n) => CONTAINER_NODE_TYPES.has(n.node_type));
+  if (!containers.length) return nodes;
+  const containerFiles = new Set(containers.map((n) => n.file?.path ?? null));
+  return nodes.filter((n) => n.node_type !== 'METHOD' || !containerFiles.has(n.file?.path ?? null));
+}
+
 function shapeNode(node) {
   return {
     node_id: node.id,
@@ -99,6 +116,7 @@ async function resolveSymbol({ symbol, file = null, projectId = null, branchIds 
     const hits = candidates.filter((n) => predicate(n) && pathMatches(n.file?.path, hint));
     if (hits.length) { matched = hits; break; }
   }
+  matched = preferContainerOverConstructor(matched);
 
   if (!matched.length) {
     // Never an empty success. A silent empty answer is a failed query wearing a success's
@@ -124,4 +142,12 @@ async function resolveSymbol({ symbol, file = null, projectId = null, branchIds 
   };
 }
 
-module.exports = { resolveSymbol, parseSymbol, finalComponent, pathMatches, resolverError };
+module.exports = {
+  resolveSymbol,
+  parseSymbol,
+  finalComponent,
+  pathMatches,
+  resolverError,
+  CONTAINER_NODE_TYPES,
+  preferContainerOverConstructor,
+};

@@ -95,8 +95,42 @@ async function resolveBranchIds({ orgId, projectId, db }) {
   return rows.map((row) => row.id);
 }
 
+// A multi-repo project's own status/report output shows paths repo-prefixed (`repo/path/to/file`),
+// so a caller copying one straight into `files_changed` is a natural mistake — but every file path
+// stored in the graph is repository-RELATIVE, so `f.path IN (...)` then matches nothing and this
+// returns [], which reads as "this file genuinely has no callers" (graph_coverage: 'unresolved'),
+// not as the wrong-path mistake it actually is. `neighbours`'s `file:` param already tolerates a
+// repo-qualified path (symbol-resolver.js#pathMatches strips it); this brings that same tolerance
+// here by ADDING the stripped form as an extra candidate path rather than replacing the original —
+// a literal top-level directory that happens to share a repo's name still matches on its own.
+async function repoNamesForBranches({ branchIds, db }) {
+  if (!branchIds.length) return [];
+  const { rows } = await db.query(
+    `SELECT DISTINCT r.name AS repo_name
+       FROM repository_branches rb
+       JOIN repositories r ON r.id = rb.repository_id
+      WHERE rb.id IN (SELECT value FROM json_each($1))`,
+    [branchIds],
+  );
+  return rows.map((r) => r.repo_name).filter(Boolean);
+}
+
+function withRepoPrefixesStripped(filesChanged, repoNames) {
+  if (!repoNames.length) return filesChanged;
+  const expanded = new Set(filesChanged);
+  for (const f of filesChanged) {
+    for (const name of repoNames) {
+      const prefix = `${name}/`;
+      if (f.startsWith(prefix)) expanded.add(f.slice(prefix.length));
+    }
+  }
+  return [...expanded];
+}
+
 async function resolveChangedNodeIds({ orgId, branchIds, filesChanged, db }) {
   if (!branchIds.length || !filesChanged.length) return [];
+  const repoNames = await repoNamesForBranches({ branchIds, db });
+  const candidatePaths = withRepoPrefixesStripped(filesChanged, repoNames);
   const { rows } = await db.query(
     `SELECT n.id
        FROM nodes n
@@ -107,7 +141,7 @@ async function resolveChangedNodeIds({ orgId, branchIds, filesChanged, db }) {
       WHERE p.org_id = $1
         AND rb.id IN (SELECT value FROM json_each($2))
         AND f.path IN (SELECT value FROM json_each($3))`,
-    [orgId, branchIds, filesChanged],
+    [orgId, branchIds, candidatePaths],
   );
   return rows.map((row) => row.id);
 }
@@ -205,12 +239,32 @@ function looksLikeTestPath(filePath) {
   return /(\.test\.|\.spec\.|__tests__\/|(^|\/)tests?\/|_test\.)/.test(String(filePath || ''));
 }
 
-// Ranked risk surface: edge distance ASC, then callers with no visible test
-// coverage first (coverage ASC), then name for determinism. Historical change
-// coupling is a v2 refinement — the column data for it is sparse today.
+// IDE-rule and template files (.cursor/rules/*.mdc, doc templates) that happen to mention a changed
+// class name pick up a real IMPORTS_SYMBOL edge exactly like a source file that imports it, but they
+// are not a call site a developer needs to look at when changing the method — on a real multi-repo
+// store these repeated once per repo and dominated the front of the ranked list ahead of every
+// actual cross-repo caller. Ranked below source, never dropped outright, so nothing here claims a
+// file is irrelevant, only that source callers are the ones worth seeing first.
+const NON_SOURCE_EXTENSIONS = new Set(['.md', '.mdc', '.markdown', '.rst', '.adoc', '.txt']);
+
+function isNonSourceFile(filePath) {
+  const m = /\.[a-zA-Z0-9]+$/.exec(String(filePath || ''));
+  return m ? NON_SOURCE_EXTENSIONS.has(m[0].toLowerCase()) : false;
+}
+
+// Ranked risk surface: edge distance ASC, then source code ahead of doc/template noise, then
+// callers with no visible test coverage first (coverage ASC), then name for determinism. Historical
+// change coupling is a v2 refinement — the column data for it is sparse today.
+//
+// Relevance is ranked BEFORE the breadth cap is applied (the cap is `.slice(0, breadthCap)` below,
+// after this sort), so a capped answer is guaranteed to have dropped the least-relevant rows rather
+// than an arbitrary mix of real callers and doc noise that happened to sort first alphabetically.
 function rankRiskSurface(callers, { breadthCap = DEFAULT_BREADTH_CAP } = {}) {
   const ranked = [...callers].sort((a, b) => {
     if (a.depth !== b.depth) return a.depth - b.depth;
+    const na = isNonSourceFile(a.file_path) ? 1 : 0;
+    const nb = isNonSourceFile(b.file_path) ? 1 : 0;
+    if (na !== nb) return na - nb;
     if (a.has_test_coverage !== b.has_test_coverage) {
       return a.has_test_coverage ? 1 : -1;
     }
@@ -257,6 +311,11 @@ async function computeBlastRadius({
   maxDepth,
   frontierCap,
   taskType = null,
+  // Ranking already puts doc/template noise (see isNonSourceFile) behind real code, but a caller
+  // who wants only code back — nothing at all from a .md/.mdc file — has no way to ask for that by
+  // ranking alone. This drops those rows outright, before the breadth cap, so they never occupy a
+  // capped slot a real caller could have used.
+  excludeNonSource = false,
   db,
 }) {
   const _db = db || pool;
@@ -352,7 +411,8 @@ async function computeBlastRadius({
     frontier = carried.map((c) => c.id);
   }
 
-  const surface = rankRiskSurface(collected, { breadthCap });
+  const sourceOnly = excludeNonSource ? collected.filter((c) => !isNonSourceFile(c.file_path)) : collected;
+  const surface = rankRiskSurface(sourceOnly, { breadthCap });
   if (surface.callers_dropped > 0) {
     // Logged, never silently truncated.
     logger.info('blast_radius.breadth_cap', {
@@ -417,6 +477,8 @@ module.exports = {
   rankRiskSurface,
   rankFrontier,
   looksLikeTestPath,
+  isNonSourceFile,
+  withRepoPrefixesStripped,
   assertImportReverseCoverage,
   expandThroughOverrides,
 };

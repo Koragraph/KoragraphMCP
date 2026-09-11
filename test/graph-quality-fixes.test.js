@@ -279,3 +279,147 @@ test('finding 5: blast_radius walks IMPORTS_SYMBOL, the edge type the cross-repo
     'blast_radius must walk IMPORTS_SYMBOL or a resolved cross-repo symbol edge is invisible to it',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Finding 6 — resolveSymbol must not report a class and its own bare-name constructor as an
+// ambiguity: a very common shape (every class in a codebase hits it), and one that used to make
+// neighbours("SomeService") come back as three unranked node ids (CLASS, SERVICE, constructor
+// METHOD) instead of a single, unambiguous answer.
+// ---------------------------------------------------------------------------
+
+const { preferContainerOverConstructor } = require('../src/mcp/symbol-resolver');
+
+test('finding 6: preferContainerOverConstructor drops a same-file constructor once its class is in the match set', () => {
+  const cls = { node_type: 'CLASS', name: 'Widget', file: { path: 'Widget.java' } };
+  const ctor = { node_type: 'METHOD', name: 'Widget', file: { path: 'Widget.java' } };
+  const kept = preferContainerOverConstructor([cls, ctor]);
+  assert.deepStrictEqual(kept, [cls]);
+});
+
+test('finding 6: preferContainerOverConstructor keeps every container when a class and a framework SERVICE node share a name', () => {
+  const cls = { node_type: 'CLASS', name: 'Widget', file: { path: 'Widget.java' } };
+  const svc = { node_type: 'SERVICE', name: 'Widget', file: { path: 'Widget.java' } };
+  const ctor = { node_type: 'METHOD', name: 'Widget', file: { path: 'Widget.java' } };
+  const kept = preferContainerOverConstructor([cls, svc, ctor]);
+  assert.deepStrictEqual(kept, [cls, svc]);
+});
+
+test('finding 6: preferContainerOverConstructor leaves a genuine cross-file name collision untouched', () => {
+  // A METHOD named "Widget" in some OTHER file is not this class's constructor — dropping it would
+  // silently hide a real, unrelated declaration that happens to share the name.
+  const cls = { node_type: 'CLASS', name: 'Widget', file: { path: 'Widget.java' } };
+  const unrelatedMethod = { node_type: 'METHOD', name: 'Widget', file: { path: 'OtherFile.java' } };
+  const kept = preferContainerOverConstructor([cls, unrelatedMethod]);
+  assert.deepStrictEqual(kept, [cls, unrelatedMethod]);
+});
+
+test('finding 6: preferContainerOverConstructor is a no-op with no container in the match set', () => {
+  const a = { node_type: 'METHOD', name: 'foo', file: { path: 'A.java' } };
+  const b = { node_type: 'METHOD', name: 'foo', file: { path: 'B.java' } };
+  assert.deepStrictEqual(preferContainerOverConstructor([a, b]), [a, b]);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 7 — blast_radius must rank real source callers ahead of IDE-rule/template/doc files that
+// merely mention a changed name, and must accept a repo-prefixed path the same way neighbours'
+// `file:` param already tolerates one.
+// ---------------------------------------------------------------------------
+
+const { isNonSourceFile, withRepoPrefixesStripped, rankRiskSurface } = require('../src/services/blast-radius');
+
+test('finding 7: isNonSourceFile flags doc/template extensions and leaves real source alone', () => {
+  assert.ok(isNonSourceFile('.cursor/rules/SQLHelperUsageExample.mdc'));
+  assert.ok(isNonSourceFile('.cursor/templates/repository-template.md'));
+  assert.ok(!isNonSourceFile('src/main/java/com/example/Widget.java'));
+  assert.ok(!isNonSourceFile('src/index.ts'));
+});
+
+test('finding 7: rankRiskSurface puts a same-depth source caller ahead of a doc/template match', () => {
+  const docMatch = {
+    name: 'SQLHelperUsageExample', depth: 1, has_test_coverage: false,
+    file_path: '.cursor/rules/SQLHelperUsageExample.mdc',
+  };
+  const realCaller = {
+    name: 'OrdersRepository', depth: 1, has_test_coverage: false,
+    file_path: 'src/main/java/com/example/api/OrdersRepository.java',
+  };
+  const { callers } = rankRiskSurface([docMatch, realCaller], { breadthCap: 25 });
+  assert.strictEqual(callers[0].name, 'OrdersRepository',
+    `expected the real source caller first, got: ${callers.map((c) => c.name).join(', ')}`);
+});
+
+test('finding 7: rankRiskSurface applies the breadth cap AFTER source-relevance ranking, not before', () => {
+  // With a cap of 1, the doc match must be the one dropped — it is only "found", never "targeted".
+  const docMatch = {
+    name: 'DocMatch', depth: 1, has_test_coverage: false, file_path: 'templates/thing.md',
+  };
+  const realCaller = {
+    name: 'RealCaller', depth: 1, has_test_coverage: false, file_path: 'src/RealCaller.java',
+  };
+  const surface = rankRiskSurface([docMatch, realCaller], { breadthCap: 1 });
+  assert.strictEqual(surface.callers_targeted, 1);
+  assert.strictEqual(surface.callers[0].name, 'RealCaller');
+  assert.strictEqual(surface.callers_dropped, 1);
+});
+
+test('finding 7: withRepoPrefixesStripped adds the bare path as a candidate alongside a repo-prefixed one', () => {
+  const expanded = withRepoPrefixesStripped(
+    ['common-utils/src/main/java/com/example/DatabaseService.java', 'unrelated/Other.java'],
+    ['common-utils'],
+  );
+  assert.ok(expanded.includes('common-utils/src/main/java/com/example/DatabaseService.java'));
+  assert.ok(expanded.includes('src/main/java/com/example/DatabaseService.java'));
+  // "unrelated/Other.java" does not start with a known repo name, so nothing is stripped from it.
+  assert.ok(expanded.includes('unrelated/Other.java'));
+  assert.strictEqual(expanded.length, 3);
+});
+
+test('finding 7: withRepoPrefixesStripped is a no-op when the project holds no repos (defensive)', () => {
+  const paths = ['a/b.java'];
+  assert.deepStrictEqual(withRepoPrefixesStripped(paths, []), paths);
+});
+
+// ---------------------------------------------------------------------------
+// Finding 8 — cross-repo-edge-resolver.js's aliasByFile only bound a call receiver that WAS ITSELF
+// the import alias (a static/qualified call, `ApiResponse.success()`). A field/local instance
+// receiver whose DECLARED TYPE is the imported symbol (`recruitmentServiceV2.approveRecruitment()`,
+// the ordinary Spring-DI shape) was never considered, so a cross-repo call reached through a
+// constructor-injected field produced no CALLS/IMPORTS_SYMBOL edge at all — only the coarse
+// class-level "this file imports that type" edge, confirmed empirically against a real ingest
+// before this fix (the graph.db's only edge into the called method was CONTAINS from its own FILE).
+// The fix reuses resolve.js's own in-repo field-type lookup helpers
+// (`bareTypeName`/`fieldNameFromReceiver`), applied to a field-type index built across every branch
+// in the project instead of one. Full end-to-end coverage (real ingest, real cross-repo edges) lives
+// in resolver-overload-crossrepo.test.js finding (d); these are unit tests of the exact helpers that
+// fix reuses, isolated from ingest.
+// ---------------------------------------------------------------------------
+
+const { bareTypeName } = require('../src/services/resolution/facts');
+const { fieldNameFromReceiver } = require('../src/services/resolution/resolve');
+
+test('finding 8: bareTypeName strips generics, array markers, and package qualifiers down to the plain class name', () => {
+  assert.strictEqual(bareTypeName('RecruitmentServiceV2'), 'RecruitmentServiceV2');
+  assert.strictEqual(bareTypeName('List<RecruitmentServiceV2>'), 'List');
+  assert.strictEqual(bareTypeName('RecruitmentServiceV2[]'), 'RecruitmentServiceV2');
+  assert.strictEqual(bareTypeName('com.digitral.common.service.RecruitmentServiceV2'), 'RecruitmentServiceV2');
+});
+
+test('finding 8: bareTypeName refuses a mangled or non-identifier fragment rather than guessing', () => {
+  assert.strictEqual(bareTypeName('int'), 'int'); // a primitive is still a plain identifier syntactically
+  assert.strictEqual(bareTypeName('<T>'), null);
+  assert.strictEqual(bareTypeName(''), null);
+  assert.strictEqual(bareTypeName(null), null);
+});
+
+test('finding 8: fieldNameFromReceiver normalises a bare field and a `this.field` receiver to the same name', () => {
+  assert.strictEqual(fieldNameFromReceiver('recruitmentServiceV2'), 'recruitmentServiceV2');
+  assert.strictEqual(fieldNameFromReceiver('this.recruitmentServiceV2'), 'recruitmentServiceV2');
+});
+
+test('finding 8: fieldNameFromReceiver refuses a namespaced/nested receiver rather than guessing a field name', () => {
+  // A genuinely package-qualified or chained receiver (`pkg.sub.Thing`, `a.b.c`) is not a field
+  // access — treating it as one would risk a false field-type match on an unrelated identifier.
+  assert.strictEqual(fieldNameFromReceiver('a.b.c'), null);
+  assert.strictEqual(fieldNameFromReceiver(''), null);
+  assert.strictEqual(fieldNameFromReceiver(null), null);
+});

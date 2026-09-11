@@ -42,6 +42,8 @@
 const pool = require('../db/pool');
 const { bulkWrite } = require('../db/bulk');
 const { edgeWriteTier } = require('./resolution/tiers');
+const { bareTypeName } = require('./resolution/facts');
+const { fieldNameFromReceiver } = require('./resolution/resolve');
 
 // ─── Path normalization helpers ───────────────────────────────────────────────
 
@@ -1007,8 +1009,9 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
   // package is able to reference.
   if (aliasByFile.size) {
     const { rows: useRows } = await _pool.query(
-      `SELECT n.file_id, n.id AS node_id, n.node_type,
+      `SELECT n.file_id, n.id AS node_id, n.node_type, n.name,
               json_extract(n.properties, '$.callExpressions') AS calls, n.repository_branch_id AS branch_id,
+              json_extract(n.properties, '$.field_type') AS field_type,
               concat_ws(' ', json_extract(n.properties, '$.params'), json_extract(n.properties, '$.type'),
                              json_extract(n.properties, '$.signature'), json_extract(n.properties, '$.return_type'),
                              json_extract(n.properties, '$.field_type')) AS type_text
@@ -1034,6 +1037,25 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
       [branchIds],
     );
     const fileQualifiedRefs = new Map(qrefRows.map(r => [r.id, r.refs]));
+
+    // file_node_id -> field name -> bare declared type name. `aliasByFile` only binds a call
+    // receiver that IS itself the import alias (`ApiResponse.success()`), never an instance whose
+    // DECLARED TYPE is the imported symbol (`recruitmentServiceV2.approveRecruitment()`, the
+    // ordinary Spring-DI shape: a constructor-injected field named for the instance, typed for the
+    // class). resolve.js#resolveViaReceiverType already does this same field-name -> declared-type
+    // lookup for a same-repo receiver; this is the identical lookup built for every repo in the
+    // project, since this pass — unlike that one — is not scoped to a single branch.
+    const fieldTypeByFile = new Map();
+    for (const u of useRows) {
+      if (u.node_type !== 'FIELD' || !u.name || !u.field_type) continue;
+      const fileNodeId = fileNodeByFileId.get(u.file_id);
+      if (fileNodeId == null) continue;
+      const bare = bareTypeName(u.field_type);
+      if (!bare) continue;
+      if (!fieldTypeByFile.has(fileNodeId)) fieldTypeByFile.set(fileNodeId, new Map());
+      fieldTypeByFile.get(fileNodeId).set(u.name, bare);
+    }
+
     for (const u of useRows) {
       const fileNodeId = fileNodeByFileId.get(u.file_id);
       const aliases = fileNodeId != null ? aliasByFile.get(fileNodeId) : null;
@@ -1044,9 +1066,19 @@ async function resolveCrossRepoPackageEdges(projectId, _pool = pool) {
       // real caller on the reverse side instead of only the file. Type-text and file-level
       // qualified refs below stay file-grained; they are stamped on the FILE node, not a member.
       const callSiteNodeId = (u.node_type === 'METHOD' && u.node_id != null) ? u.node_id : fileNodeId;
+      const fileFieldTypes = fieldTypeByFile.get(fileNodeId);
       for (const call of (Array.isArray(u.calls) ? u.calls : [])) {
         if (!call || !call.receiver || !call.callee) continue;
-        const bound = aliases.get(call.receiver);
+        let bound = aliases.get(call.receiver);
+        if (!bound && fileFieldTypes) {
+          // Not itself an import alias — try it as a field/`this.field` instance receiver whose
+          // declared type IS the alias (`svc.doWork()` where `svc: FooService` and `FooService`
+          // is imported from another repo). A receiver with an unrelated dot in it
+          // (`a.b.c`, not `this.x`) is refused rather than guessed at, same as the in-repo pass.
+          const fieldName = fieldNameFromReceiver(call.receiver);
+          const fieldType = fieldName ? fileFieldTypes.get(fieldName) : null;
+          if (fieldType) bound = aliases.get(fieldType);
+        }
         if (!bound) continue;
         // Go/PHP/C#/Python/JS/TS have a dedicated tree-sitter pass here and `callee` is already
         // the bare symbol name (`pflag.NewFlagSet` -> receiver "pflag", callee "NewFlagSet"). Java

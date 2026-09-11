@@ -236,4 +236,8 @@ module.exports = {
   exportFact,
   starExportFact,
   buildFileScopedIndex,
+  // Exported for cross-repo-edge-resolver.js's own field-declared-type lookup — the cross-repo
+  // equivalent of the in-repo `classFieldsById` this same helper feeds above, needing the same
+  // generic/array/package-qualifier stripping so both sides compare bare type names.
+  bareTypeName: _bareTypeName,
 };

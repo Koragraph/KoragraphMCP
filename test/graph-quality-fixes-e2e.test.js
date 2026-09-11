@@ -183,19 +183,21 @@ test('finding 1: neighbours(direction: "in") surfaces every real caller of a sma
     `expected all real callers ranked ahead of self-referential DEFINED_IN rows, got order: ${JSON.stringify(inRows.map((r) => `${r.name}(${r.edge_type})`))}`);
 });
 
-test('finding 1: neighbours(direction: "in") ranks a large class\'s one real caller ahead of its own structural noise', async () => {
+test('finding 1: neighbours(direction: "in") surfaces a large class\'s one real caller with none of its own structural noise', async () => {
+  // DEFINED_IN/CONTAINS are excluded by default now (see tool-handlers.js's
+  // STRUCTURAL_MEMBERSHIP_EDGE_TYPES), rather than merely ranked behind the real caller — a
+  // stricter, better outcome than the ranking-only fix this test originally checked for. A
+  // 30-method class's own membership bookkeeping (30 DEFINED_IN edges, one CONTAINS edge per
+  // member) must not appear in the default answer at all, only its one real external caller.
   const res = await th.neighbours({
     symbol: 'BigService', direction: 'in', detail: 'full', limit: 60, project_id: 'bigclass',
   }, {});
   const inRows = res.data.neighbours.in;
-  assert.ok(inRows.length > BIGCLASS_METHOD_COUNT,
-    `expected more in-edges than methods (structural self-noise plus the real caller), got ${inRows.length}`);
   const realCallerIdx = inRows.findIndex((r) => r.name === 'RealCaller');
-  assert.ok(realCallerIdx !== -1, 'expected RealCaller among the (unlimited) in-edges');
+  assert.ok(realCallerIdx !== -1, `expected RealCaller among the in-edges, got: ${JSON.stringify(inRows.map((r) => r.name))}`);
   assert.ok(realCallerIdx < 60, `expected RealCaller within the default limit of 60, got position ${realCallerIdx + 1}`);
-  const selfMethodIdx = inRows.findIndex((r) => r.edge_type === 'DEFINED_IN');
-  assert.ok(selfMethodIdx === -1 || realCallerIdx < selfMethodIdx,
-    'expected the real caller to rank ahead of the class\'s own DEFINED_IN self-edges');
+  assert.ok(inRows.every((r) => r.edge_type !== 'DEFINED_IN' && r.edge_type !== 'CONTAINS'),
+    `expected no structural membership noise in the default answer, got: ${JSON.stringify(inRows.map((r) => `${r.name}(${r.edge_type})`))}`);
 });
 
 // Pure unit-level confirmation of the actual code change, isolated from resolver-tier reality:
@@ -269,4 +271,25 @@ test('finding 3: a commented-out re-export produces no IMPORTS/IMPORTS_SYMBOL/DE
   } finally {
     db.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Finding 8 — blast_radius must accept a repo-prefixed path in `files_changed`. A multi-repo
+// project's own status/report output shows paths repo-prefixed (`repo/path/to/file`), which is an
+// easy, natural copy-paste mistake into `files_changed` — and every path actually stored in the
+// graph is repository-relative, so the prefixed form used to resolve to graph_coverage:
+// "unresolved" / callers_found: 0 with no error, indistinguishable from "this file genuinely has no
+// callers".
+// ---------------------------------------------------------------------------
+
+test('finding 8: blast_radius resolves a files_changed path prefixed with its own repo name', async () => {
+  const res = await th.blastRadius({
+    files_changed: ['bigclass/src/main/java/com/example/util/BigService.java'],
+    detail: 'full',
+  }, {});
+  assert.strictEqual(res.data.graph_coverage, 'resolved',
+    `expected the repo-prefixed path to resolve, got: ${JSON.stringify(res.data)}`);
+  const callers = res.data.callers || [];
+  assert.ok(callers.some((c) => c.name === 'RealCaller'),
+    `expected RealCaller among callers, got: ${JSON.stringify(callers.map((c) => c.name))}`);
 });

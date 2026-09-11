@@ -1033,6 +1033,10 @@ module.exports = {
   resolveViaImportEvidence,
   resolveViaReceiverImport,
   resolveViaReceiverType,
+  // Exported for cross-repo-edge-resolver.js's own receiver-to-field-name normalisation — the
+  // same "this.x -> x, a.b.c -> not a field access" rule applies whether the field's declared
+  // type turns out to live in this repo or another one.
+  fieldNameFromReceiver: _fieldNameFromReceiver,
   resolveViaModuleStem,
   resolveViaGlobalLabel,
   stripJsonc,

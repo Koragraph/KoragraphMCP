@@ -78,6 +78,15 @@ const LIB_FIXTURE = {
     'package com.digitral.common.utils;\n'
     + 'public class DatabaseService {\n'
     + '  public static String fetchData(String q) { return q; }\n}\n',
+  // (d) a real Spring service, called by the consumer through an INJECTED FIELD rather than a
+  // static/qualified reference — see below.
+  'src/main/java/com/digitral/common/service/RecruitmentServiceV2.java':
+    'package com.digitral.common.service;\n'
+    + 'import org.springframework.stereotype.Service;\n\n'
+    + '@Service\n'
+    + 'public class RecruitmentServiceV2 {\n'
+    + '  public String approveRecruitment(long id) { return "approved:" + id; }\n'
+    + '  public String rejectRecruitment(long id) { return "rejected:" + id; }\n}\n',
 };
 
 const CONSUMER_FIXTURE = {
@@ -95,6 +104,18 @@ const CONSUMER_FIXTURE = {
     + '  public ApiResponse listOrders(long id) {\n'
     + '    String data = DatabaseService.fetchData("q" + id);\n'
     + '    return ApiResponse.success(data);\n  }\n}\n',
+  // (d) a controller injecting the cross-repo service as a field and calling its methods — the
+  // ordinary Spring-DI shape (constructor injection, instance receiver), as opposed to (b)/(c)'s
+  // static/qualified calls above. One call through the bare field, one through `this.field`.
+  'src/main/java/com/example/api/RecruitmentControllerV2.java':
+    'package com.example.api;\n'
+    + 'import com.digitral.common.service.RecruitmentServiceV2;\n'
+    + 'public class RecruitmentControllerV2 {\n'
+    + '  private final RecruitmentServiceV2 recruitmentServiceV2;\n\n'
+    + '  public RecruitmentControllerV2(RecruitmentServiceV2 recruitmentServiceV2) {\n'
+    + '    this.recruitmentServiceV2 = recruitmentServiceV2;\n  }\n\n'
+    + '  public String approve(long id) {\n    return recruitmentServiceV2.approveRecruitment(id);\n  }\n\n'
+    + '  public String reject(long id) {\n    return this.recruitmentServiceV2.rejectRecruitment(id);\n  }\n}\n',
 };
 
 let home;
@@ -190,5 +211,58 @@ test('(c) forward neighbours of the consumer method reach its cross-repo callees
   assert.ok(
     names.has('success'),
     `forward direction should reach the overloaded cross-repo callee success, got: ${JSON.stringify(outs.map((r) => ({ name: r.name, edge_type: r.edge_type, cross: r.cross_repo })))}`,
+  );
+});
+
+// ── (d) Cross-repo calls through an INJECTED FIELD (Spring DI), not a static/qualified reference.
+//        cross-repo-edge-resolver.js's aliasByFile only bound a call receiver that WAS ITSELF the
+//        import alias (`ApiResponse.success()`), never an instance whose DECLARED TYPE is the
+//        imported symbol (`recruitmentServiceV2.approveRecruitment()`) — the ordinary shape for a
+//        constructor-injected field, and the single most common cross-repo call shape in a real
+//        Spring microservice fleet. resolve.js#resolveViaReceiverType already resolves this same
+//        shape in-repo; it is scoped to one branch's fileIndex by construction (ingest.js builds it
+//        per-branch), so it can never see a field typed with a class from another repo. Confirmed
+//        empirically (session's own probe ingest, not committed) before this fix: the only edge
+//        landing on the called method was CONTAINS from its own FILE — no CALLS/IMPORTS_SYMBOL edge
+//        at all, despite the class-level import already producing one. ────────────────────────────
+
+test('(d) a cross-repo call through a plain injected-field receiver binds to the method it calls', async () => {
+  const result = await th.neighbours({
+    symbol: 'src/main/java/com/digitral/common/service/RecruitmentServiceV2.java:approveRecruitment',
+    direction: 'in', detail: 'full',
+  }, {});
+  const relations = result.data.neighbours.in;
+  const fromConsumer = relations.filter((r) => r.cross_repo
+    && (r.file || '').endsWith('RecruitmentControllerV2.java'));
+  assert.ok(
+    fromConsumer.length > 0,
+    `expected a cross-repo caller in consumerapi's RecruitmentControllerV2, got: ${JSON.stringify(relations.map((r) => ({ name: r.name, file: r.file, edge_type: r.edge_type, cross: r.cross_repo })))}`,
+  );
+});
+
+test('(d) a cross-repo call through a `this.field` receiver also binds to the method it calls', async () => {
+  const result = await th.neighbours({
+    symbol: 'src/main/java/com/digitral/common/service/RecruitmentServiceV2.java:rejectRecruitment',
+    direction: 'in', detail: 'full',
+  }, {});
+  const relations = result.data.neighbours.in;
+  const fromConsumer = relations.filter((r) => r.cross_repo
+    && (r.file || '').endsWith('RecruitmentControllerV2.java'));
+  assert.ok(
+    fromConsumer.length > 0,
+    `expected a cross-repo caller via this.field, got: ${JSON.stringify(relations.map((r) => ({ name: r.name, file: r.file, edge_type: r.edge_type, cross: r.cross_repo })))}`,
+  );
+});
+
+test('(d) forward neighbours of the DI-calling controller method reach the injected-field callee cross-repo', async () => {
+  const result = await th.neighbours({
+    symbol: 'src/main/java/com/example/api/RecruitmentControllerV2.java:approve',
+    direction: 'out', detail: 'full',
+  }, {});
+  const outs = result.data.neighbours.out || [];
+  const names = new Set(outs.filter((r) => r.cross_repo).map((r) => r.name));
+  assert.ok(
+    names.has('approveRecruitment'),
+    `forward direction should reach the injected-field cross-repo callee approveRecruitment, got: ${JSON.stringify(outs.map((r) => ({ name: r.name, edge_type: r.edge_type, cross: r.cross_repo })))}`,
   );
 });

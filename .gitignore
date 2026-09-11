@@ -27,3 +27,5 @@ practice.db-*
 
 # npm pack output.
 *.tgz
+# nhands: per-machine hooks (absolute paths)
+.claude/settings.local.json
