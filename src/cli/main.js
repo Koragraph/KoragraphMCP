@@ -33,6 +33,7 @@ const COMMANDS = {
   trace: { summary: 'Run tests and fold the calls that actually happened into the graph (Python)', load: () => require('./trace') },
   report: { summary: 'Write a Markdown snapshot of the graph (GRAPH_REPORT.md)', load: () => require('./report') },
   practice: { summary: 'Inspect, correct and maintain what has been learned about this code', load: () => require('./practice') },
+  project: { summary: 'Project the practice store into a readable, git-diffable Markdown tree', load: () => require('./project') },
 };
 
 const HELP = `koragraph — a local, multi-repo code graph for your coding agent
